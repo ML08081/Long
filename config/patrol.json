@@ -1,0 +1,13 @@
+{
+  "_comment": "巡检路径示例配置。坐标单位：米，heading_deg：航向角（正北=0，顺时针）。",
+  "patrol": {
+    "loop": true,
+    "waypoints": [
+      { "x": 0.0, "y": 0.0,  "heading_deg": 0.0,   "dwell_ms": 2000, "label": "起点" },
+      { "x": 5.0, "y": 0.0,  "heading_deg": 90.0,  "dwell_ms": 1000, "label": "A 点" },
+      { "x": 5.0, "y": 5.0,  "heading_deg": 180.0, "dwell_ms": 1000, "label": "B 点" },
+      { "x": 0.0, "y": 5.0,  "heading_deg": 270.0, "dwell_ms": 1000, "label": "C 点" },
+      { "x": 0.0, "y": 0.0,  "heading_deg": 0.0,   "dwell_ms": 0,    "label": "返回起点" }
+    ]
+  }
+}

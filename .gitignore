@@ -1,0 +1,17 @@
+# 构建产物
+/build/
+/build-loong/
+*.o
+*.a
+*.so
+*.out
+
+# 编辑器/系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# CMake 缓存（若误生成在源码树）
+CMakeCache.txt
+CMakeFiles/

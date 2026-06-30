@@ -1,0 +1,8 @@
+# 统一为 LF 行结尾，保证在 Linux/WSL 下直接编译、脚本可直接执行
+* text=auto eol=lf
+
+# 明确二进制类型不做转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.bin  binary

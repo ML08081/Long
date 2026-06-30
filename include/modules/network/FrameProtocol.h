@@ -1,0 +1,148 @@
+#ifndef PATROL_MODULES_NETWORK_FRAMEPROTOCOL_H
+#define PATROL_MODULES_NETWORK_FRAMEPROTOCOL_H
+
+#include <cstdint>
+#include <cstddef>
+#include <vector>
+#include <string>
+
+// =============================================================================
+//  FrameProtocol — 与上位机 LongLook 对接的网络帧协议 (v2)
+//
+//  链路：龙芯 2K0300 (TCP 服务端) ←—WiFi/TCP—→ LongLook PC 前端 (TCP 客户端)
+//
+//  帧格式（流式，TCP 已保证可靠，故不加 CRC）：
+//    ┌──────┬──────┬────────────┬────────────────┐
+//    │ 0xA5 │ TYPE │ LEN(4B LE) │ PAYLOAD(LEN B) │
+//    └──────┴──────┴────────────┴────────────────┘
+//
+//  本头文件与 LongLook 工程的 protocol.h 一一对应，二者必须保持一致。
+// =============================================================================
+
+namespace patrol {
+namespace net {
+
+constexpr uint8_t  LL_SOF         = 0xA5;
+constexpr int      LL_HEADER_SIZE = 6;                     // SOF(1)+TYPE(1)+LEN(4)
+constexpr uint32_t LL_MAX_PAYLOAD = 16u * 1024u * 1024u;   // 16 MiB 上限
+
+// 帧类型
+enum FrameType : uint8_t {
+    FRAME_SENSOR  = 0x01,   // 龙芯→前端 综合传感器遥测（40 字节，小端，变长容忍）
+    FRAME_VIDEO   = 0x10,   // 龙芯→前端 视频帧：JPEG/PNG 编码字节流
+    FRAME_THERMAL = 0x20,   // 龙芯→前端 热成像帧：uint16 w,h + w*h 个 int16 温度(0.01°C)
+    FRAME_TEXT    = 0x30,   // 龙芯→前端 文本/日志：UTF-8
+    FRAME_COMMAND = 0x40,   // 前端→龙芯 下行命令：payload = [cmdId u8][value u8]
+};
+
+// 下行命令 ID（执行与联动模块控制）
+enum CmdId : uint8_t {
+    CMD_FAN    = 0x01,   // 风扇   value: 0关/1开
+    CMD_BUZZER = 0x02,   // 蜂鸣器 value: 0关/1开
+    CMD_RELAY  = 0x03,   // 继电器 value: 0断/1通
+    CMD_LED    = 0x04,   // LED    value: 0灭/1亮
+    CMD_MODE   = 0x05,   // 模式   value: 0手动/1自动/2避障/3巡检
+    CMD_ESTOP  = 0x06,   // 急停   value: 1
+};
+
+constexpr int LL_SENSOR_PAYLOAD_SIZE = 40;
+
+// -----------------------------------------------------------------------------
+//  构造 6 字节帧头：[0xA5][type][len 小端 4B]
+// -----------------------------------------------------------------------------
+inline void buildHeader(uint8_t type, uint32_t len, uint8_t out[LL_HEADER_SIZE]) {
+    out[0] = LL_SOF;
+    out[1] = type;
+    out[2] = static_cast<uint8_t>( len        & 0xFF);
+    out[3] = static_cast<uint8_t>((len >> 8)  & 0xFF);
+    out[4] = static_cast<uint8_t>((len >> 16) & 0xFF);
+    out[5] = static_cast<uint8_t>((len >> 24) & 0xFF);
+}
+
+// -----------------------------------------------------------------------------
+//  打包一整帧到 vector（含头+负载），用于一次性写出
+// -----------------------------------------------------------------------------
+inline std::vector<uint8_t> buildFrame(uint8_t type, const uint8_t* payload, size_t len) {
+    std::vector<uint8_t> frame;
+    frame.reserve(LL_HEADER_SIZE + len);
+    uint8_t hdr[LL_HEADER_SIZE];
+    buildHeader(type, static_cast<uint32_t>(len), hdr);
+    frame.insert(frame.end(), hdr, hdr + LL_HEADER_SIZE);
+    if (payload && len) frame.insert(frame.end(), payload, payload + len);
+    return frame;
+}
+
+// -----------------------------------------------------------------------------
+//  综合传感器遥测负载（小端，规范长度 40 字节）。
+//  当前阶段仅用于让上位机的卡片显示有数据流动，字段多为占位值。
+// -----------------------------------------------------------------------------
+struct SensorData {
+    uint32_t timestamp_ms    = 0;
+    int16_t  temperature_01c = 0;   // 0.1°C
+    uint16_t humidity_01     = 0;   // 0.1 %
+    uint16_t gas_ppm         = 0;
+    uint32_t pressure_pa     = 0;
+    uint16_t distance_cm     = 0;
+    int32_t  encoder1        = 0;
+    int32_t  encoder2        = 0;
+    int16_t  speed_L         = 0;
+    int16_t  speed_R         = 0;
+    uint16_t servo_us        = 0;
+    uint16_t voltage_mV      = 0;
+    uint8_t  mode            = 0;
+    uint8_t  fault           = 0;
+    uint8_t  risk_level      = 0;
+    uint8_t  flags           = 0;
+    uint8_t  fan             = 0;
+    uint8_t  buzzer          = 0;
+    uint8_t  relay           = 0;
+    uint8_t  led             = 0;
+};
+
+// 将 SensorData 序列化为 40 字节小端负载
+namespace detail {
+    inline void put_u8 (std::vector<uint8_t>& b, uint8_t  v) { b.push_back(v); }
+    inline void put_u16(std::vector<uint8_t>& b, uint16_t v) { b.push_back(uint8_t(v)); b.push_back(uint8_t(v >> 8)); }
+    inline void put_u32(std::vector<uint8_t>& b, uint32_t v) {
+        b.push_back(uint8_t(v)); b.push_back(uint8_t(v >> 8));
+        b.push_back(uint8_t(v >> 16)); b.push_back(uint8_t(v >> 24));
+    }
+} // namespace detail
+
+inline std::vector<uint8_t> packSensor(const SensorData& s) {
+    std::vector<uint8_t> b;
+    b.reserve(LL_SENSOR_PAYLOAD_SIZE);
+    using namespace detail;
+    put_u32(b, s.timestamp_ms);
+    put_u16(b, static_cast<uint16_t>(s.temperature_01c));
+    put_u16(b, s.humidity_01);
+    put_u16(b, s.gas_ppm);
+    put_u32(b, s.pressure_pa);
+    put_u16(b, s.distance_cm);
+    put_u32(b, static_cast<uint32_t>(s.encoder1));
+    put_u32(b, static_cast<uint32_t>(s.encoder2));
+    put_u16(b, static_cast<uint16_t>(s.speed_L));
+    put_u16(b, static_cast<uint16_t>(s.speed_R));
+    put_u16(b, s.servo_us);
+    put_u16(b, s.voltage_mV);
+    put_u8 (b, s.mode);
+    put_u8 (b, s.fault);
+    put_u8 (b, s.risk_level);
+    put_u8 (b, s.flags);
+    put_u8 (b, s.fan);
+    put_u8 (b, s.buzzer);
+    put_u8 (b, s.relay);
+    put_u8 (b, s.led);
+    return b; // 恰好 40 字节
+}
+
+// 解析出的下行命令
+struct Command {
+    uint8_t cmdId = 0;
+    uint8_t value = 0;
+};
+
+} // namespace net
+} // namespace patrol
+
+#endif // PATROL_MODULES_NETWORK_FRAMEPROTOCOL_H

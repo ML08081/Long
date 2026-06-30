@@ -1,0 +1,21 @@
+{
+  "_comment": "PatrolSystem 运行配置。通过 -c 指定路径，命令行参数可覆盖同名配置项。",
+  "camera": {
+    "device": "/dev/video0",
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "format": "MJPEG"
+  },
+  "network": {
+    "role": "tcp_server",
+    "bind": "0.0.0.0",
+    "port": 8080,
+    "peer_note": "上位机 LongLook 作为 TCP 客户端；龙芯板 IP 请在 LongLook 中配置"
+  },
+  "serial": {
+    "device": "/dev/ttyS1",
+    "baud": 115200,
+    "_note": "串口设备节点待硬件引脚确认后修改"
+  }
+}
