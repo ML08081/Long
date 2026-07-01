@@ -1,0 +1,6 @@
+0x568f2f3f	put_vaddr_frames	vmlinux	EXPORT_SYMBOL
+0x655611bf	get_vaddr_frames	vmlinux	EXPORT_SYMBOL
+0xfcdc14d6	frame_vector_to_pfns	vmlinux	EXPORT_SYMBOL
+0x689f370d	frame_vector_to_pages	vmlinux	EXPORT_SYMBOL
+0xff903b43	frame_vector_destroy	vmlinux	EXPORT_SYMBOL
+0xa1dee5f1	frame_vector_create	vmlinux	EXPORT_SYMBOL

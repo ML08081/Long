@@ -1,10 +1,15 @@
 # 构建产物
 /build/
 /build-loong/
+/build-loong-static/
 *.o
 *.a
 *.so
 *.out
+
+# 部署包生成物（由 scripts/make_package.sh 生成）
+/patrol_deploy/
+patrol_deploy*.tar.gz
 
 # 编辑器/系统
 .vscode/

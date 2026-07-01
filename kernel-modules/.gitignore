@@ -1,0 +1,12 @@
+# 构建产物 / 大文件,不入库
+/build/
+/linux-src/
+*.ko
+*.tar.gz
+*.tar.xz
+# 板子采集信息
+board-kinfo*/
+board-kinfo*.tar.gz
+# 临时
+_*.sh
+_*.py

@@ -1,0 +1,20 @@
+# =============================================================================
+#  patrol-network.service -- 开机 WiFi 自动连接（先于 patrol.service 运行）
+# =============================================================================
+[Unit]
+Description=PatrolSystem 开机 WiFi 自动连接（Station 连 B410 + 固定 IP）
+Before=patrol.service
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/patrol_setup_network /etc/patrol/network.conf
+# 等待 AIC8800 固件就绪 + 多轮连接尝试，给足超时
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

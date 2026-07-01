@@ -1,0 +1,25 @@
+# =============================================================================
+#  patrol.service -- PatrolSystem 开机自启主服务
+# =============================================================================
+[Unit]
+Description=PatrolSystem 龙芯巡检视频链路服务（下位机）
+After=network-online.target patrol-network.service
+Wants=network-online.target
+Requires=patrol-network.service
+
+[Service]
+Type=simple
+# 启动前健康检测（非致命，仅记录日志）
+ExecStartPre=/usr/bin/patrol_healthcheck /var/log/patrol
+# 经 start.sh 包装启动（等摄像头就绪 + 指定日志目录）
+ExecStart=/usr/bin/patrol_start
+# 崩溃/摄像头掉线导致退出时自动重启
+Restart=always
+RestartSec=3
+User=root
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

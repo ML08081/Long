@@ -3,6 +3,7 @@
 #include "modules/network/FrameProtocol.h"
 
 #include <chrono>
+#include <thread>
 #include <vector>
 
 namespace patrol {
@@ -27,18 +28,64 @@ const char* cmdName(uint8_t id) {
 }
 } // namespace
 
+bool Application::interruptibleSleep(int totalMs) {
+    int slept = 0;
+    while (slept < totalMs) {
+        if (!running_.load()) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        slept += 100;
+    }
+    return running_.load();
+}
+
+// 启动健康检测：把关键子系统状态汇总打印，便于开机后一眼判断是否就绪
+bool Application::healthCheck() {
+    LOG_INFO("---------- 启动健康检测 ----------");
+    bool camOk = camera_.isOpen();
+    bool netOk = server_.isListening();
+
+    LOG_INFO("[健康] 摄像头 : %s  (%s %dx%d %s)",
+             camOk ? "正常" : "异常",
+             cfg_.device.c_str(), camera_.width(), camera_.height(),
+             camera_.isMjpeg() ? "MJPEG" : "非MJPEG");
+    if (camOk && !camera_.isMjpeg())
+        LOG_WARN("[健康] 摄像头非 MJPEG 输出，上位机可能无法解码，建议更换摄像头");
+
+    LOG_INFO("[健康] 网络监听: %s  (%s:%u)",
+             netOk ? "正常" : "异常", cfg_.bindAddr.c_str(), cfg_.port);
+
+    bool healthy = camOk && netOk;
+    LOG_INFO("[健康] 总体状态: %s", healthy ? "就绪 (HEALTHY)" : "降级 (DEGRADED)");
+    LOG_INFO("----------------------------------");
+    return healthy;
+}
+
 int Application::run() {
     LOG_INFO("==== PatrolSystem 启动 ====");
 
-    if (!camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps)) {
-        LOG_ERROR("摄像头打开失败，请确认设备 %s 存在", cfg_.device.c_str());
+    // 打开摄像头：开机时 USB 可能尚未枚举完成，采用可中断重试而非直接退出。
+    int attempt = 0;
+    while (running_.load() &&
+           !camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps)) {
+        ++attempt;
+        LOG_WARN("摄像头 %s 打开失败（第 %d 次），3 秒后重试...",
+                 cfg_.device.c_str(), attempt);
+        if (!interruptibleSleep(3000)) {
+            LOG_INFO("启动阶段收到退出请求");
+            return 0;
+        }
+    }
+    if (!running_.load()) return 0;
+
+    // 启动 TCP 监听（绑定 0.0.0.0 不依赖网卡是否已分配 IP）。
+    if (!server_.listen(cfg_.port, cfg_.bindAddr)) {
+        LOG_ERROR("TCP 监听失败");
+        camera_.close();
         return 1;
     }
 
-    if (!server_.listen(cfg_.port, cfg_.bindAddr)) {
-        LOG_ERROR("TCP 监听失败");
-        return 1;
-    }
+    // 启动健康检测
+    healthCheck();
 
     while (running_.load()) {
         std::string peer;
@@ -70,23 +117,30 @@ void Application::serveClient(int clientFd) {
 
     std::vector<uint8_t> rxBuf;
     std::vector<net::Command> cmds;
-    uint32_t frameCount  = 0;
-    uint32_t lastStatMs  = nowMs();
+    uint32_t frameCount   = 0;
+    uint32_t lastStatMs   = nowMs();
     uint32_t lastSensorMs = 0;
+    uint32_t grabFailCnt  = 0;
 
     while (running_.load()) {
-        // ── 采集并推送一帧视频 ──
         const uint8_t* data = nullptr;
         size_t size = 0;
-        if (camera_.grabFrame(&data, &size, /*timeoutMs=*/1000) && size > 0) {
-            if (!TcpServer::sendFrame(clientFd, net::FRAME_VIDEO, data, size))
+        if (camera_.grabFrame(&data, &size, /*timeoutMs=*/1000)) {
+            grabFailCnt = 0;
+            if (size > 0) {
+                if (!TcpServer::sendFrame(clientFd, net::FRAME_VIDEO, data, size))
+                    break;
+                ++frameCount;
+            }
+        } else {
+            if (++grabFailCnt >= 5) {
+                LOG_WARN("连续 %u 次取帧失败，疑似摄像头掉线，断开本次连接", grabFailCnt);
                 break;
-            ++frameCount;
+            }
         }
 
         uint32_t t = nowMs();
 
-        // ── 每秒推送一次传感器占位数据 ──
         if (t - lastSensorMs >= 1000) {
             lastSensorMs = t;
             net::SensorData s;
@@ -99,16 +153,13 @@ void Application::serveClient(int clientFd) {
                 break;
         }
 
-        // ── 处理上位机下行命令 ──
         cmds.clear();
         int rc = TcpServer::pollCommands(clientFd, rxBuf, cmds);
-        // rc < 0：-1 对端关闭，-2 读错误，均应退出推流循环
         if (rc < 0) break;
         for (const auto& c : cmds) {
             LOG_INFO("下行命令: %s (0x%02X value=%u)", cmdName(c.cmdId), c.cmdId, c.value);
         }
 
-        // ── 每秒打印帧率 ──
         if (t - lastStatMs >= 1000) {
             LOG_INFO("推流: %u fps  %dx%d", frameCount, camera_.width(), camera_.height());
             frameCount = 0;
