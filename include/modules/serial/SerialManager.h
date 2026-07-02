@@ -14,6 +14,8 @@ namespace patrol {
 class SerialManager {
 public:
     using TelemetryCallback = std::function<void(const serial_proto::Telemetry&)>;
+    // 组装完一整幅热成像(32x24 int16, 0.01°C, 行主序)后回调
+    using ThermalCallback = std::function<void(const int16_t* temps, int cols, int rows)>;
 
     SerialManager() = default;
     ~SerialManager();
@@ -26,6 +28,7 @@ public:
     bool isOpen() const { return fd_ >= 0; }
 
     void setTelemetryCallback(TelemetryCallback cb) { cb_ = std::move(cb); }
+    void setThermalCallback(ThermalCallback cb) { thermalCb_ = std::move(cb); }
 
     // 发送命令帧（龙芯 -> F4）。speed/steering 会被限幅到 [-1000,1000]。
     bool sendCommand(int16_t speed, int16_t steering, uint8_t mode);
@@ -36,7 +39,9 @@ public:
 private:
     int                     fd_ = -1;
     TelemetryCallback       cb_;
+    ThermalCallback         thermalCb_;
     std::vector<uint8_t>    rxBuf_;
+    int16_t                 thermalBuf_[serial_proto::THERMAL_PIXELS] = {0};  // 行组装缓冲
 };
 
 } // namespace patrol

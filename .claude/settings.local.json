@@ -74,7 +74,9 @@
       "Bash(scp -O -o StrictHostKeyChecking=no patrol_deploy_v1.2.0.tar.gz root@192.168.3.100:/root/)",
       "Bash(echo \"EXIT=$?\")",
       "Bash(git -C /f/projectForXN/NGFXM rev-parse --is-inside-work-tree)",
-      "Bash(git -C /f/projectForXN/NGFXM/LongLook rev-parse --is-inside-work-tree)"
+      "Bash(git -C /f/projectForXN/NGFXM/LongLook rev-parse --is-inside-work-tree)",
+      "Bash(ping -n 2 -w 1500 192.168.3.100)",
+      "Bash(sort -t= -k2)"
     ]
   }
 }

@@ -92,7 +92,22 @@ void SerialManager::poll() {
         const uint8_t* base = rxBuf_.data() + off;
         if (base[0] != HEADER) { ++off; continue; }
 
-        if (base[1] == EXT_MARKER) {
+        if (base[1] == THERMAL_MARKER) {
+            // ---- 热成像行帧: [AA][5B][row][32*int16 BE][XOR], 固定 68 字节 ----
+            if (size - off < static_cast<size_t>(THERMAL_ROW_LEN)) break;   // 半包
+            uint8_t crc = xorChecksum(base, THERMAL_ROW_LEN - 1);
+            if (crc != base[THERMAL_ROW_LEN - 1]) { ++off; continue; }      // 失步
+            uint8_t row = base[2];
+            if (row < THERMAL_ROWS) {
+                const uint8_t* p = base + 3;
+                for (int c = 0; c < THERMAL_COLS; ++c)
+                    thermalBuf_[row * THERMAL_COLS + c] = rdI16(p + c * 2);
+                // 收到最后一行 -> 一整幅组装完成
+                if (row == THERMAL_ROWS - 1 && thermalCb_)
+                    thermalCb_(thermalBuf_, THERMAL_COLS, THERMAL_ROWS);
+            }
+            off += THERMAL_ROW_LEN;
+        } else if (base[1] == EXT_MARKER) {
             // ---- 扩展遥测帧: [AA][5A][LEN][payload...][XOR] ----
             if (size - off < 3) break;                 // 需要 LEN
             uint8_t len  = base[2];

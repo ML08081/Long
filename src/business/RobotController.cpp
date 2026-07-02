@@ -28,6 +28,8 @@ bool RobotController::init(const std::string& device, int baud) {
         return false;
     }
     serial_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
+    serial_.setThermalCallback(
+        [this](const int16_t* t, int c, int r) { onThermal(t, c, r); });
     LOG_INFO("RobotController 就绪（串口 %s @ %d）", device.c_str(), baud);
     return true;
 }
@@ -46,6 +48,24 @@ void RobotController::onTelemetry(const serial_proto::Telemetry& t) {
     }
     telemValid_  = true;
     lastTelemMs_ = nowMs();
+}
+
+void RobotController::onThermal(const int16_t* temps, int cols, int rows) {
+    std::lock_guard<std::mutex> lk(thermalMtx_);
+    thermal_.assign(temps, temps + static_cast<size_t>(cols) * rows);
+    thermalCols_ = cols;
+    thermalRows_ = rows;
+    thermalNew_  = true;
+}
+
+bool RobotController::takeThermal(std::vector<int16_t>& out, int& cols, int& rows) {
+    std::lock_guard<std::mutex> lk(thermalMtx_);
+    if (!thermalNew_) return false;
+    out  = thermal_;
+    cols = thermalCols_;
+    rows = thermalRows_;
+    thermalNew_ = false;
+    return true;
 }
 
 void RobotController::computeAvoid(uint16_t d, int16_t baseSpeed,

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace patrol {
 
@@ -50,10 +51,14 @@ public:
     // 把最新 F4 遥测 + 机器人状态填入发给上位机的 SensorData
     void fillSensorData(net::SensorData& s) const;
 
+    // 取出最新热成像帧（若自上次取用后有新帧）。有新帧返回 true 并填 out/cols/rows。
+    bool takeThermal(std::vector<int16_t>& out, int& cols, int& rows);
+
     RobotMode mode() const;
 
 private:
     void onTelemetry(const serial_proto::Telemetry& t);            // 串口回调（控制线程）
+    void onThermal(const int16_t* temps, int cols, int rows);      // 串口回调（热成像帧）
     void computeAvoid(uint16_t distCm, int16_t baseSpeed,
                       int16_t& speed, int16_t& steering) const;    // 距离 -> 运动
 
@@ -71,6 +76,13 @@ private:
     uint32_t                lastTelemMs_ = 0;
     ActuatorState           actuators_;   // F4 无对应硬件，仅回显给上位机
     RobotStatus             status_      = RobotStatus::Idle;
+
+    // 热成像帧（单独锁，避免大拷贝阻塞运动共享态）
+    mutable std::mutex      thermalMtx_;
+    std::vector<int16_t>    thermal_;
+    int                     thermalCols_ = 0;
+    int                     thermalRows_ = 0;
+    bool                    thermalNew_  = false;
 };
 
 } // namespace patrol

@@ -26,10 +26,17 @@ namespace serial_proto {
 
 constexpr uint8_t HEADER          = 0xAA;
 constexpr uint8_t EXT_MARKER      = 0x5A;   // 扩展遥测帧第二字节
+constexpr uint8_t THERMAL_MARKER  = 0x5B;   // 热成像行帧第二字节
 constexpr uint8_t TELEMETRY_FLAG  = 0x80;   // 旧遥测帧 mode 的 bit7
 constexpr uint8_t CMD_FRAME_LEN   = 7;
 constexpr uint8_t EXT_PAYLOAD_LEN = 15;
 constexpr uint8_t EXT_FRAME_LEN   = 3 + EXT_PAYLOAD_LEN + 1;  // = 19
+
+// 热成像（MLX90640 32x24，分行传输）
+constexpr int THERMAL_COLS    = 32;
+constexpr int THERMAL_ROWS    = 24;
+constexpr int THERMAL_PIXELS  = THERMAL_COLS * THERMAL_ROWS;   // 768
+constexpr int THERMAL_ROW_LEN = 3 + THERMAL_COLS * 2 + 1;      // 68: [AA][5B][row][32*i16 BE][XOR]
 
 enum Mode : uint8_t {
     MODE_MANUAL   = 0,

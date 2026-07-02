@@ -147,6 +147,7 @@ void Application::serveClient(int clientFd) {
     std::vector<uint8_t> rxBuf;
     std::vector<net::Command> cmds;
     std::vector<net::DriveCommand> drives;
+    std::vector<int16_t> thermalBuf;   // 复用，减少分配
     uint32_t frameCount   = 0;
     uint32_t lastStatMs   = nowMs();
     uint32_t lastSensorMs = 0;
@@ -178,6 +179,27 @@ void Application::serveClient(int clientFd) {
             auto pl = net::packSensor(s);
             if (!TcpServer::sendFrame(clientFd, net::FRAME_SENSOR, pl.data(), pl.size()))
                 break;
+        }
+
+        // 转发热成像帧（F4 -> 龙芯 组装完成后 -> LongLook 0x20）：
+        //   payload = [w u16 LE][h u16 LE][w*h int16 LE 温度(0.01°C)]
+        {
+            int tCols = 0, tRows = 0;
+            if (robot_.takeThermal(thermalBuf, tCols, tRows) && tCols > 0 && tRows > 0) {
+                std::vector<uint8_t> pl;
+                pl.reserve(4 + thermalBuf.size() * 2);
+                pl.push_back(static_cast<uint8_t>(tCols & 0xFF));
+                pl.push_back(static_cast<uint8_t>((tCols >> 8) & 0xFF));
+                pl.push_back(static_cast<uint8_t>(tRows & 0xFF));
+                pl.push_back(static_cast<uint8_t>((tRows >> 8) & 0xFF));
+                for (int16_t v : thermalBuf) {
+                    uint16_t u = static_cast<uint16_t>(v);
+                    pl.push_back(static_cast<uint8_t>(u & 0xFF));
+                    pl.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
+                }
+                if (!TcpServer::sendFrame(clientFd, net::FRAME_THERMAL, pl.data(), pl.size()))
+                    break;
+            }
         }
 
         cmds.clear();
