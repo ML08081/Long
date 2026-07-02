@@ -50,11 +50,12 @@ public:
     // 发送一段 UTF-8 文本作为 FRAME_TEXT
     static bool sendText(int fd, const std::string& text);
 
-    // 非阻塞读取并解析对端发来的下行命令(0x40)，追加到 out。
+    // 非阻塞读取并解析对端发来的下行帧：命令(0x40) 追加到 cmds，手动驱动(0x41) 追加到 drives。
     //   buf 为该连接的累积缓冲区（调用方持有，跨调用保留半包）。
     //   返回值：>=0 本次读到的字节数；-1 对端关闭；-2 读错误。
     static int pollCommands(int fd, std::vector<uint8_t>& buf,
-                            std::vector<net::Command>& out);
+                            std::vector<net::Command>& cmds,
+                            std::vector<net::DriveCommand>& drives);
 
     static void closeClient(int fd);
 

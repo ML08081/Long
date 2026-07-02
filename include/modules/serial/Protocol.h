@@ -3,70 +3,86 @@
 
 #include <cstdint>
 #include <cstddef>
-#include <vector>
+#include <array>
 
 // ==========================================================================
-//  串口协议（龙芯 SBC <-> 下位机 MCU）
+//  串口协议 —— 与 F4(STM32F407) 固件 Core/Protocol/protocol.{h,c} 完全一致
+//  物理链路：龙芯 /dev/ttyS1 (USART) <-> F4 USART3，115200 8N1
 //
-//  帧格式：[0xAA][0x55][LEN(1B)][CMD(1B)][PAYLOAD(LEN-1 B)][CRC8]
-//    LEN  = CMD字节 + payload 字节数
-//    CRC8 = poly 0x07 覆盖 LEN..payload
+//  命令帧（龙芯 -> F4），定长 7 字节，大端序：
+//    [0]=0xAA [1]=spd_hi [2]=spd_lo [3]=str_hi [4]=str_lo [5]=mode(bit7=0) [6]=XOR(0..5)
+//    speed/steering : int16, -1000~+1000（speed +前进/-后退；steering +右/-左）
+//    mode           : 0=Manual 1=Auto 2=Obstacle 3=Cruise
 //
-//  方向：
-//    0x1x  龙芯 -> MCU  (控制命令)
-//    0x2x  MCU -> 龙芯  (上报/应答)
+//  遥测帧（F4 -> 龙芯）：
+//    · 旧 7 字节遥测（与命令帧同构，mode 的 bit7=1）——仅 speed/steer/mode
+//    · 扩展遥测帧（本工程新增，携带超声波距离 + 编码器）：
+//        [0]=0xAA [1]=0x5A(EXT) [2]=LEN(=15) [3..]=payload [末]=XOR(0..2+LEN)
+//        payload(15B，大端)：spd i16 | str i16 | mode u8 | dist_cm u16 | enc1 i32 | enc2 i32
 // ==========================================================================
 
 namespace patrol {
 namespace serial_proto {
 
-constexpr uint8_t SOF1 = 0xAA;
-constexpr uint8_t SOF2 = 0x55;
-constexpr int     HEADER_SIZE = 4;   // SOF1+SOF2+LEN+CMD
+constexpr uint8_t HEADER          = 0xAA;
+constexpr uint8_t EXT_MARKER      = 0x5A;   // 扩展遥测帧第二字节
+constexpr uint8_t TELEMETRY_FLAG  = 0x80;   // 旧遥测帧 mode 的 bit7
+constexpr uint8_t CMD_FRAME_LEN   = 7;
+constexpr uint8_t EXT_PAYLOAD_LEN = 15;
+constexpr uint8_t EXT_FRAME_LEN   = 3 + EXT_PAYLOAD_LEN + 1;  // = 19
 
-// 龙芯 -> MCU
-enum CmdByte : uint8_t {
-    CMD_SET_SPEED  = 0x11,   // [int16 L mm/s][int16 R mm/s]
-    CMD_SET_SERVO  = 0x12,   // [uint16 pulse_us]
-    CMD_SET_FAN    = 0x13,   // [uint8 0/1]
-    CMD_SET_BUZZER = 0x14,   // [uint8 0/1]
-    CMD_SET_RELAY  = 0x15,   // [uint8 0/1]
-    CMD_SET_LED    = 0x16,   // [uint8 0/1]
-    CMD_ESTOP      = 0x17,   // 无 payload
-    CMD_RESET      = 0x18,   // 无 payload
+enum Mode : uint8_t {
+    MODE_MANUAL   = 0,
+    MODE_AUTO     = 1,
+    MODE_OBSTACLE = 2,
+    MODE_CRUISE   = 3,
 };
 
-// MCU -> 龙芯
-enum ReportByte : uint8_t {
-    RPT_SENSORS  = 0x21,   // 传感器全量 16 字节
-    RPT_ENCODERS = 0x22,   // [int32 enc1][int32 enc2]
-    RPT_ACK      = 0x2F,   // [uint8 cmd_id][uint8 status]
+// 遥测解析结果
+struct Telemetry {
+    int16_t  speed       = 0;
+    int16_t  steering    = 0;
+    uint8_t  mode        = 0;
+    uint16_t dist_cm     = 0;      // 0 = 无效/超量程
+    int32_t  enc1        = 0;
+    int32_t  enc2        = 0;
+    bool     hasDistance = false;  // true=来自扩展帧(dist/enc 有效); false=旧 7 字节遥测
 };
 
-// CRC-8 (poly 0x07)
-inline uint8_t crc8(const uint8_t* data, size_t len) {
-    uint8_t crc = 0;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; ++j)
-            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x07)
-                               : static_cast<uint8_t>(crc << 1);
-    }
-    return crc;
+// XOR 校验（与 F4 Protocol_CalculateChecksum 一致）
+inline uint8_t xorChecksum(const uint8_t* data, size_t len) {
+    uint8_t c = 0;
+    for (size_t i = 0; i < len; ++i) c ^= data[i];
+    return c;
 }
 
-inline std::vector<uint8_t> buildFrame(uint8_t cmd,
-                                        const uint8_t* payload = nullptr,
-                                        uint8_t payloadLen = 0) {
-    std::vector<uint8_t> f;
-    f.push_back(SOF1);
-    f.push_back(SOF2);
-    f.push_back(static_cast<uint8_t>(payloadLen + 1));  // LEN
-    f.push_back(cmd);
-    if (payload && payloadLen > 0)
-        f.insert(f.end(), payload, payload + payloadLen);
-    f.push_back(crc8(f.data() + 2, f.size() - 2));
+// 打包命令帧（7 字节）。速度/转向自动限幅到 [-1000,1000]。
+inline std::array<uint8_t, CMD_FRAME_LEN>
+buildCommand(int16_t speed, int16_t steering, uint8_t mode) {
+    if (speed > 1000)      speed = 1000;
+    else if (speed < -1000) speed = -1000;
+    if (steering > 1000)      steering = 1000;
+    else if (steering < -1000) steering = -1000;
+
+    std::array<uint8_t, CMD_FRAME_LEN> f{};
+    f[0] = HEADER;
+    f[1] = static_cast<uint8_t>((static_cast<uint16_t>(speed) >> 8) & 0xFF);
+    f[2] = static_cast<uint8_t>( static_cast<uint16_t>(speed)       & 0xFF);
+    f[3] = static_cast<uint8_t>((static_cast<uint16_t>(steering) >> 8) & 0xFF);
+    f[4] = static_cast<uint8_t>( static_cast<uint16_t>(steering)       & 0xFF);
+    f[5] = static_cast<uint8_t>(mode & 0x03);   // bit7=0 => 命令帧
+    f[6] = xorChecksum(f.data(), 6);
     return f;
+}
+
+// 大端读取辅助
+inline int16_t  rdI16(const uint8_t* p) { return static_cast<int16_t>((p[0] << 8) | p[1]); }
+inline uint16_t rdU16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
+inline int32_t  rdI32(const uint8_t* p) {
+    return static_cast<int32_t>((static_cast<uint32_t>(p[0]) << 24) |
+                                (static_cast<uint32_t>(p[1]) << 16) |
+                                (static_cast<uint32_t>(p[2]) <<  8) |
+                                 static_cast<uint32_t>(p[3]));
 }
 
 } // namespace serial_proto

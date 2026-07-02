@@ -46,12 +46,13 @@ set(PATROL_SOURCES
     src/modules/camera/CameraManager.cpp
     src/modules/network/TcpServer.cpp
     src/modules/config/ConfigManager.cpp
+    # 阶段二：串口 + 运动控制（F4 协议 / 距离避障）
+    src/modules/serial/SerialManager.cpp
+    src/business/RobotController.cpp
 )
 
-# ---- 阶段二：串口 + 运动控制（硬件确认后取消注释）------------------------
-#    src/modules/serial/SerialManager.cpp
+# ---- 其余业务模块（后续接入后取消注释）----------------------------------
 #    src/modules/network/TcpClient.cpp
-#    src/business/RobotController.cpp
 #    src/business/PatrolController.cpp
 #    src/business/MissionManager.cpp
 

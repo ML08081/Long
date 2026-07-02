@@ -7,7 +7,6 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
-#include <sys/select.h>
 
 namespace patrol {
 
@@ -42,7 +41,7 @@ bool SerialManager::open(const std::string& device, int baud) {
     speed_t sp = toSpeed(baud);
     ::cfsetispeed(&tty, sp);
     ::cfsetospeed(&tty, sp);
-    ::cfmakeraw(&tty);
+    ::cfmakeraw(&tty);       // 8N1、无回显、无流控、原始模式
     tty.c_cc[VMIN]  = 0;
     tty.c_cc[VTIME] = 0;
 
@@ -51,47 +50,85 @@ bool SerialManager::open(const std::string& device, int baud) {
         close(); return false;
     }
 
-    LOG_INFO("串口已打开: %s @ %d baud", device.c_str(), baud);
+    rxBuf_.clear();
+    LOG_INFO("串口已打开: %s @ %d baud (F4 协议)", device.c_str(), baud);
     return true;
 }
 
 void SerialManager::close() {
     if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
+    rxBuf_.clear();
 }
 
-bool SerialManager::sendCmd(uint8_t cmd, const uint8_t* payload, uint8_t payloadLen) {
+bool SerialManager::sendCommand(int16_t speed, int16_t steering, uint8_t mode) {
     if (fd_ < 0) return false;
-    auto frame = serial_proto::buildFrame(cmd, payload, payloadLen);
-    ssize_t n = ::write(fd_, frame.data(), frame.size());
-    return n == static_cast<ssize_t>(frame.size());
+    auto frame = serial_proto::buildCommand(speed, steering, mode);
+    size_t sent = 0;
+    while (sent < frame.size()) {
+        ssize_t n = ::write(fd_, frame.data() + sent, frame.size() - sent);
+        if (n > 0) { sent += static_cast<size_t>(n); continue; }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        LOG_WARN("串口发送失败 (已发 %zu/%zu): %s", sent, frame.size(), std::strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 void SerialManager::poll() {
     if (fd_ < 0) return;
     uint8_t tmp[256];
-    ssize_t n = ::read(fd_, tmp, sizeof(tmp));
-    if (n <= 0) return;
-    rxBuf_.insert(rxBuf_.end(), tmp, tmp + n);
+    for (;;) {
+        ssize_t n = ::read(fd_, tmp, sizeof(tmp));
+        if (n > 0) { rxBuf_.insert(rxBuf_.end(), tmp, tmp + n); if (n == sizeof(tmp)) continue; }
+        break;   // n<=0 或已读尽
+    }
+    if (rxBuf_.empty()) return;
 
-    // 解帧：[AA][55][LEN][CMD]...[CRC]
+    using namespace serial_proto;
     size_t off = 0;
-    while (rxBuf_.size() - off >= 5) {
-        if (rxBuf_[off] != serial_proto::SOF1 || rxBuf_[off+1] != serial_proto::SOF2) {
-            ++off; continue;
+    const size_t size = rxBuf_.size();
+
+    while (size - off >= 2) {
+        const uint8_t* base = rxBuf_.data() + off;
+        if (base[0] != HEADER) { ++off; continue; }
+
+        if (base[1] == EXT_MARKER) {
+            // ---- 扩展遥测帧: [AA][5A][LEN][payload...][XOR] ----
+            if (size - off < 3) break;                 // 需要 LEN
+            uint8_t len  = base[2];
+            size_t  need = static_cast<size_t>(3) + len + 1;
+            if (size - off < need) break;              // 半包
+            uint8_t crc = xorChecksum(base, 3 + len);
+            if (crc != base[need - 1]) { ++off; continue; }  // 失步
+
+            if (len >= EXT_PAYLOAD_LEN && cb_) {
+                const uint8_t* p = base + 3;
+                Telemetry t;
+                t.speed       = rdI16(p + 0);
+                t.steering    = rdI16(p + 2);
+                t.mode        = p[4] & 0x03;
+                t.dist_cm     = rdU16(p + 5);
+                t.enc1        = rdI32(p + 7);
+                t.enc2        = rdI32(p + 11);
+                t.hasDistance = true;
+                cb_(t);
+            }
+            off += need;
+        } else {
+            // ---- 旧 7 字节遥测帧: [AA][spd][str][mode|0x80][XOR] ----
+            if (size - off < CMD_FRAME_LEN) break;     // 半包
+            uint8_t crc = xorChecksum(base, 6);
+            if (crc != base[6]) { ++off; continue; }   // 失步
+            if (cb_) {
+                Telemetry t;
+                t.speed       = rdI16(base + 1);
+                t.steering    = rdI16(base + 3);
+                t.mode        = base[5] & 0x03;
+                t.hasDistance = false;
+                cb_(t);
+            }
+            off += CMD_FRAME_LEN;
         }
-        uint8_t len = rxBuf_[off + 2];
-        size_t  need = static_cast<size_t>(len) + 4;   // SOF1+SOF2+LEN + len + CRC
-        if (rxBuf_.size() - off < need) break;
-
-        uint8_t crcCalc = serial_proto::crc8(rxBuf_.data() + off + 2, need - 3);
-        uint8_t crcRecv = rxBuf_[off + need - 1];
-        if (crcCalc != crcRecv) { ++off; continue; }
-
-        uint8_t  cmdByte    = rxBuf_[off + 3];
-        const uint8_t* pl   = rxBuf_.data() + off + 4;
-        size_t   plLen      = static_cast<size_t>(len) - 1;
-        if (rxCb_) rxCb_(cmdByte, pl, plLen);
-        off += need;
     }
     if (off > 0) rxBuf_.erase(rxBuf_.begin(), rxBuf_.begin() + static_cast<long>(off));
 }

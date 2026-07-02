@@ -33,6 +33,8 @@ enum FrameType : uint8_t {
     FRAME_THERMAL = 0x20,   // 龙芯→前端 热成像帧：uint16 w,h + w*h 个 int16 温度(0.01°C)
     FRAME_TEXT    = 0x30,   // 龙芯→前端 文本/日志：UTF-8
     FRAME_COMMAND = 0x40,   // 前端→龙芯 下行命令：payload = [cmdId u8][value u8]
+    FRAME_DRIVE   = 0x41,   // 前端→龙芯 手动驱动：payload = [speed i16 LE][steering i16 LE]
+                            //   龙芯据此切 MANUAL 并转发同步命令给 F4（链路验证/手动操控）
 };
 
 // 下行命令 ID（执行与联动模块控制）
@@ -140,6 +142,12 @@ inline std::vector<uint8_t> packSensor(const SensorData& s) {
 struct Command {
     uint8_t cmdId = 0;
     uint8_t value = 0;
+};
+
+// 解析出的手动驱动命令（FRAME_DRIVE）
+struct DriveCommand {
+    int16_t speed    = 0;   // -1000~+1000
+    int16_t steering = 0;   // -1000~+1000
 };
 
 } // namespace net

@@ -133,7 +133,8 @@ bool TcpServer::sendText(int fd, const std::string& text) {
 }
 
 int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
-                            std::vector<net::Command>& out) {
+                            std::vector<net::Command>& out,
+                            std::vector<net::DriveCommand>& drives) {
     // 非阻塞读取所有可用数据
     uint8_t tmp[512];
     int total = 0;
@@ -169,6 +170,12 @@ int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
             c.cmdId = buf[off + net::LL_HEADER_SIZE + 0];
             c.value = buf[off + net::LL_HEADER_SIZE + 1];
             out.push_back(c);
+        } else if (type == net::FRAME_DRIVE && len >= 4) {
+            const uint8_t* p = buf.data() + off + net::LL_HEADER_SIZE;
+            net::DriveCommand d;   // payload 小端：speed i16 | steering i16
+            d.speed    = static_cast<int16_t>(uint16_t(p[0]) | (uint16_t(p[1]) << 8));
+            d.steering = static_cast<int16_t>(uint16_t(p[2]) | (uint16_t(p[3]) << 8));
+            drives.push_back(d);
         }
         off += need;
     }

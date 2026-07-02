@@ -49,7 +49,32 @@
       "PowerShell(wsl bash /opPJ/PatrolSystem/kernel-modules/_run_compat.sh 2>&1 | Select-Object -Last 30)",
       "PowerShell(wsl bash /opPJ/PatrolSystem/kernel-modules/_repack.sh)",
       "PowerShell(wsl bash /opPJ/PatrolSystem/kernel-modules/_repack.sh 2>&1 | Select-Object -Last 5; Write-Output \"--- cleanup temps ---\"; wsl bash -c \"rm -f /opPJ/PatrolSystem/kernel-modules/_run_compat.sh /opPJ/PatrolSystem/kernel-modules/_repack.sh; echo done\")",
-      "PowerShell(wsl bash /opPJ/PatrolSystem/kernel-modules/scripts/03_make_package.sh 2>&1 | Select-Object -Last 4)"
+      "PowerShell(wsl bash /opPJ/PatrolSystem/kernel-modules/scripts/03_make_package.sh 2>&1 | Select-Object -Last 4)",
+      "Bash(wsl.exe *)",
+      "Bash(ping -n 1 -w 1000 192.168.3.100)",
+      "Bash(ping -n 1 -w 1000 192.168.3.158)",
+      "Bash(timeout 8 ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@192.168.3.158 'echo CONNECTED; uname -r; ls /dev/video* 2>&1')",
+      "Bash(timeout 8 ssh *)",
+      "Bash(readelf -l build-loong/bin/patrol_system)",
+      "Bash(ssh *)",
+      "Bash(xargs ls -lt)",
+      "Bash(bash *)",
+      "Bash(scp -o StrictHostKeyChecking=no patrol_deploy_v1.1.0.tar.gz root@192.168.3.100:/root/)",
+      "Bash(scp -O -o StrictHostKeyChecking=no patrol_deploy_v1.1.0.tar.gz root@192.168.3.100:/root/)",
+      "Read(//mnt/f/projectForXN/**)",
+      "Bash(powershell.exe -Command \"Get-ChildItem 'F:\\\\projectForXN\\\\NGFXM' | Select-Object Name,Mode\")",
+      "Bash(cd /mnt/f/projectForXN/NGFXM)",
+      "Bash(ls */ -d)",
+      "PowerShell(Get-ChildItem 'F:\\\\projectForXN\\\\NGFXM' -Directory | ForEach-Object { $_.Name })",
+      "PowerShell(wsl.exe -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem && rm -rf build && bash scripts/build_local.sh 2>&1 | tail -40\" | Out-String)",
+      "PowerShell(wsl.exe -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem && rm -rf build build-loong CMakeCache.txt CMakeFiles cmake_install.cmake Makefile && mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Debug .. >/tmp/cm.log 2>&1; tail -8 /tmp/cm.log; echo '=== MAKE ==='; make -j2 2>&1 | tail -45\" | Out-String)",
+      "PowerShell(wsl.exe -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem/build && make -j2 2>&1 | tail -30\" | Out-String)",
+      "PowerShell(wsl.exe -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem && bash scripts/detect_toolchain.sh; echo '---rc---'; echo \\\\$?\" | Out-String)",
+      "PowerShell(wsl.exe -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem && rm -rf build-loong && bash scripts/make_package.sh 2>&1 | tail -40\" | Out-String)",
+      "Bash(scp -O -o StrictHostKeyChecking=no patrol_deploy_v1.2.0.tar.gz root@192.168.3.100:/root/)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(git -C /f/projectForXN/NGFXM rev-parse --is-inside-work-tree)",
+      "Bash(git -C /f/projectForXN/NGFXM/LongLook rev-parse --is-inside-work-tree)"
     ]
   }
 }

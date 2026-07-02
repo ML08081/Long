@@ -54,6 +54,13 @@ bool Application::healthCheck() {
     LOG_INFO("[健康] 网络监听: %s  (%s:%u)",
              netOk ? "正常" : "异常", cfg_.bindAddr.c_str(), cfg_.port);
 
+    bool serialOk = robot_.isOpen();
+    LOG_INFO("[健康] 下位机串口: %s  (%s @ %d)",
+             serialOk ? "正常" : "未接入", cfg_.serialDevice.c_str(), cfg_.serialBaud);
+    if (!serialOk)
+        LOG_WARN("[健康] F4 串口未打开，运动/避障不可用（仅视频链路可用）");
+
+    // 串口未接入不算致命（视频链路仍可用），仅摄像头+网络决定 HEALTHY
     bool healthy = camOk && netOk;
     LOG_INFO("[健康] 总体状态: %s", healthy ? "就绪 (HEALTHY)" : "降级 (DEGRADED)");
     LOG_INFO("----------------------------------");
@@ -84,8 +91,15 @@ int Application::run() {
         return 1;
     }
 
+    // 打开下位机 F4 串口（失败不致命，仅运动/避障不可用）
+    robot_.init(cfg_.serialDevice, cfg_.serialBaud);
+
     // 启动健康检测
     healthCheck();
+
+    // 启动控制线程（串口遥测 + 避障 + 下发命令），独立于上位机连接
+    if (robot_.isOpen())
+        controlThread_ = std::thread([this] { controlLoop(); });
 
     while (running_.load()) {
         std::string peer;
@@ -98,10 +112,25 @@ int Application::run() {
         LOG_INFO("上位机 %s 已断开，等待重连...", peer.c_str());
     }
 
+    if (controlThread_.joinable()) controlThread_.join();
+    robot_.close();
     camera_.close();
     server_.close();
     LOG_INFO("==== PatrolSystem 已退出 ====");
     return 0;
+}
+
+// 控制线程：~30Hz 轮询串口遥测、按模式做避障、下发 F4 命令帧。
+void Application::controlLoop() {
+    LOG_INFO("控制线程启动（F4 串口 @ ~30Hz）");
+    while (running_.load()) {
+        robot_.tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+    // 退出前发一帧停车，避免下位机保持最后速度
+    robot_.emergencyStop();
+    robot_.tick();
+    LOG_INFO("控制线程退出");
 }
 
 void Application::serveClient(int clientFd) {
@@ -117,6 +146,7 @@ void Application::serveClient(int clientFd) {
 
     std::vector<uint8_t> rxBuf;
     std::vector<net::Command> cmds;
+    std::vector<net::DriveCommand> drives;
     uint32_t frameCount   = 0;
     uint32_t lastStatMs   = nowMs();
     uint32_t lastSensorMs = 0;
@@ -141,23 +171,26 @@ void Application::serveClient(int clientFd) {
 
         uint32_t t = nowMs();
 
-        if (t - lastSensorMs >= 1000) {
+        if (t - lastSensorMs >= 200) {   // 5Hz 遥测，含 F4 距离/编码器/速度/模式
             lastSensorMs = t;
             net::SensorData s;
-            s.timestamp_ms = t;
-            s.voltage_mV   = 12000;
-            s.mode         = 3;
-            s.risk_level   = 0;
+            robot_.fillSensorData(s);    // 真实下位机数据
             auto pl = net::packSensor(s);
             if (!TcpServer::sendFrame(clientFd, net::FRAME_SENSOR, pl.data(), pl.size()))
                 break;
         }
 
         cmds.clear();
-        int rc = TcpServer::pollCommands(clientFd, rxBuf, cmds);
+        drives.clear();
+        int rc = TcpServer::pollCommands(clientFd, rxBuf, cmds, drives);
         if (rc < 0) break;
         for (const auto& c : cmds) {
             LOG_INFO("下行命令: %s (0x%02X value=%u)", cmdName(c.cmdId), c.cmdId, c.value);
+            robot_.handleCommand(c);     // 路由到运动/避障控制
+        }
+        for (const auto& d : drives) {
+            LOG_DEBUG("手动驱动: speed=%d steering=%d", d.speed, d.steering);
+            robot_.driveManual(d.speed, d.steering);   // 上位机手动操控 -> 转发 F4
         }
 
         if (t - lastStatMs >= 1000) {
