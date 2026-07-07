@@ -76,7 +76,31 @@
       "Bash(git -C /f/projectForXN/NGFXM rev-parse --is-inside-work-tree)",
       "Bash(git -C /f/projectForXN/NGFXM/LongLook rev-parse --is-inside-work-tree)",
       "Bash(ping -n 2 -w 1500 192.168.3.100)",
-      "Bash(sort -t= -k2)"
+      "Bash(sort -t= -k2)",
+      "Bash(cmd.exe /c dir \"F:\\\\projectForXN\\\\NGFXM\\\\F4_VGT6first\")",
+      "Read(//c/Users/molim/**)",
+      "PowerShell(wsl.exe -e bash -lc 'cd /opPJ/PatrolSystem 2>/dev/null && pwd && for t in g++ cmake make; do if command -v $t >/dev/null 2>&1; then echo \"$t OK: $\\($t --version | head -1\\)\"; else echo \"$t MISSING\"; fi; done')",
+      "PowerShell(wsl.exe --cd /opPJ/PatrolSystem -e bash _check.sh 2>&1)",
+      "PowerShell(wsl.exe --cd /opPJ/PatrolSystem -e bash scripts/build_local.sh 2>&1 | Select-Object -Last 30)",
+      "PowerShell(wsl.exe --cd /opPJ/PatrolSystem -e bash -c 'rm -rf build-loong && bash scripts/make_package.sh' 2>&1 | Select-Object -Last 45)",
+      "Bash(git -C \"F:/projectForXN/NGFXM/F4_VGT6first\" rev-parse --is-inside-work-tree)",
+      "Bash(sed -n '40,90p' \"F:/projectForXN/NGFXM/F4_VGT6first/Core/HC/hc.c\")",
+      "Bash(sed -n '255,330p' \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/freertos.c\")",
+      "Bash(sed -n '405,432p' \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/freertos.c\")",
+      "Bash(grep -rnA6 \"Servo_AngleToPulse\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/\")",
+      "Bash(sed -n '100,145p' \"F:/projectForXN/NGFXM/F4_VGT6first/Core/HC/hc.c\")",
+      "Bash(grep -nA30 \"void HC_TIM2_IRQHandler\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/HC/hc.c\")",
+      "Bash(cd \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\opPJ\\\\PatrolSystem\")",
+      "Bash(tar -tzf patrol_deploy.tar.gz)",
+      "Bash(rm -f patrol_deploy.tar.gz patrol_deploy_v1.1.0.tar.gz patrol_deploy_v1.2.0.tar.gz patrol_deploy_v1.3.0.tar.gz)",
+      "Bash(find . -maxdepth 2 -name \"patrol_deploy*.tar.gz\")",
+      "WebFetch(domain:www.waveshare.net)",
+      "Read(//f/projectForXN/**)",
+      "Read(//f/QT/6.11.0/**)",
+      "Read(//f/QT/Tools/**)",
+      "Bash(cat \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\opPJ\\\\PatrolSystem\\\\config\\\\config.json\")",
+      "Bash(grep -nA8 \"void HardFault_Handler|void MemManage_Handler|void BusFault_Handler|void UsageFault_Handler\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/stm32f4xx_it.c\")",
+      "Bash(grep -nA6 \"void UART_Log|UART_Log\\\\\\(\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/usart.c\")"
     ]
   }
 }

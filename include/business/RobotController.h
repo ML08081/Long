@@ -59,6 +59,7 @@ public:
 private:
     void onTelemetry(const serial_proto::Telemetry& t);            // 串口回调（控制线程）
     void onThermal(const int16_t* temps, int cols, int rows);      // 串口回调（热成像帧）
+    void onEnv(const serial_proto::EnvData& e);                    // 串口回调（环境/安全帧）
     void computeAvoid(uint16_t distCm, int16_t baseSpeed,
                       int16_t& speed, int16_t& steering) const;    // 距离 -> 运动
 
@@ -74,6 +75,8 @@ private:
     serial_proto::Telemetry telem_{};
     bool                    telemValid_  = false;
     uint32_t                lastTelemMs_ = 0;
+    serial_proto::EnvData   env_{};        // 最新环境/安全帧（气体/激光/温湿度/报警）
+    uint32_t                lastEnvMs_   = 0;
     ActuatorState           actuators_;   // F4 无对应硬件，仅回显给上位机
     RobotStatus             status_      = RobotStatus::Idle;
 

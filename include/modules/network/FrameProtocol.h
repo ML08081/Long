@@ -47,7 +47,20 @@ enum CmdId : uint8_t {
     CMD_ESTOP  = 0x06,   // 急停   value: 1
 };
 
-constexpr int LL_SENSOR_PAYLOAD_SIZE = 40;
+// v2 基础负载 40 字节；v3 在其后追加激光测距(2B)，共 42 字节。
+// FRAME_SENSOR 为“变长容忍”：旧 LongLook 只读前 40 字节忽略其余，新 LongLook 读满 42。
+constexpr int LL_SENSOR_PAYLOAD_SIZE_V2 = 40;
+constexpr int LL_SENSOR_PAYLOAD_SIZE    = 42;
+
+// SensorData.flags 位定义（与 F4 环境帧 ENV_FLAG_* / serial_proto 一一对应）
+enum SensorFlag : uint8_t {
+    SF_GAS_ALARM = 0x01,   // 气体浓度超阈
+    SF_FLAME     = 0x02,   // 火焰检测
+    SF_DHT_OK    = 0x04,   // 温湿度有效
+    SF_VL53_OK   = 0x08,   // 激光测距有效
+    SF_OBSTACLE  = 0x10,   // 障碍确认（激光+超声波双重验证）
+    SF_BUZZER    = 0x20,   // 蜂鸣器鸣响中
+};
 
 // -----------------------------------------------------------------------------
 //  构造 6 字节帧头：[0xA5][type][len 小端 4B]
@@ -99,6 +112,8 @@ struct SensorData {
     uint8_t  buzzer          = 0;
     uint8_t  relay           = 0;
     uint8_t  led             = 0;
+    // ---- v3 追加字段（在 40 字节之后，向后兼容）----
+    uint16_t laser_cm        = 0;   // VL53L0X 激光测距(cm)，0=无效/超量程
 };
 
 // 将 SensorData 序列化为 40 字节小端负载
@@ -135,7 +150,9 @@ inline std::vector<uint8_t> packSensor(const SensorData& s) {
     put_u8 (b, s.buzzer);
     put_u8 (b, s.relay);
     put_u8 (b, s.led);
-    return b; // 恰好 40 字节
+    // ---- v3 追加：激光测距（第 40~41 字节）----
+    put_u16(b, s.laser_cm);
+    return b; // 42 字节（前 40 字节与 v2 完全一致）
 }
 
 // 解析出的下行命令

@@ -129,6 +129,28 @@ void SerialManager::poll() {
                 cb_(t);
             }
             off += need;
+        } else if (base[1] == ENV_MARKER) {
+            // ---- 环境/安全遥测帧: [AA][5C][LEN][payload...][XOR] ----
+            if (size - off < 3) break;                 // 需要 LEN
+            uint8_t len  = base[2];
+            size_t  need = static_cast<size_t>(3) + len + 1;
+            if (size - off < need) break;              // 半包
+            uint8_t crc = xorChecksum(base, 3 + len);
+            if (crc != base[need - 1]) { ++off; continue; }  // 失步
+
+            if (len >= ENV_PAYLOAD_LEN && envCb_) {
+                const uint8_t* p = base + 3;
+                EnvData e;
+                e.gas_raw = rdU16(p + 0);
+                e.vl53_mm = rdU16(p + 2);
+                e.temp_c  = static_cast<int8_t>(p[4]);
+                e.humi    = p[5];
+                e.flags   = p[6];
+                e.alarm   = p[7];
+                e.valid   = true;
+                envCb_(e);
+            }
+            off += need;
         } else {
             // ---- 旧 7 字节遥测帧: [AA][spd][str][mode|0x80][XOR] ----
             if (size - off < CMD_FRAME_LEN) break;     // 半包

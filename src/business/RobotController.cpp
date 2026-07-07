@@ -30,6 +30,7 @@ bool RobotController::init(const std::string& device, int baud) {
     serial_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
     serial_.setThermalCallback(
         [this](const int16_t* t, int c, int r) { onThermal(t, c, r); });
+    serial_.setEnvCallback([this](const serial_proto::EnvData& e) { onEnv(e); });
     LOG_INFO("RobotController 就绪（串口 %s @ %d）", device.c_str(), baud);
     return true;
 }
@@ -48,6 +49,12 @@ void RobotController::onTelemetry(const serial_proto::Telemetry& t) {
     }
     telemValid_  = true;
     lastTelemMs_ = nowMs();
+}
+
+void RobotController::onEnv(const serial_proto::EnvData& e) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    env_       = e;
+    lastEnvMs_ = nowMs();
 }
 
 void RobotController::onThermal(const int16_t* temps, int cols, int rows) {
@@ -186,15 +193,36 @@ void RobotController::fillSensorData(net::SensorData& s) const {
     s.mode         = mode_;
     s.fault        = (telemValid_ && (nowMs() - lastTelemMs_) > 1000) ? 1 : 0;  // 遥测超时告警
     s.fan          = actuators_.fan    ? 1 : 0;
-    s.buzzer       = actuators_.buzzer ? 1 : 0;
     s.relay        = actuators_.relay  ? 1 : 0;
     s.led          = actuators_.led    ? 1 : 0;
 
-    // 视觉风险等级：由前方距离推导（未接摄像头识别前的占位）
+    // ---- 环境/安全传感器（来自 F4 0x5C 帧）----
+    const bool envValid = env_.valid;
+    if (envValid) {
+        s.gas_ppm = env_.gas_raw;                 // MQ2 原始 ADC（0~4095，非真实 ppm）
+        s.flags   = env_.flags;                   // 位: 气体/火焰/DHT/VL53/障碍/蜂鸣
+        if (env_.flags & serial_proto::ENV_FLAG_DHT_OK) {
+            s.temperature_01c = static_cast<int16_t>(env_.temp_c) * 10;   // 0.1°C
+            s.humidity_01     = static_cast<uint16_t>(env_.humi) * 10;    // 0.1 %
+        }
+        // 激光测距（VL53L0X）：有效则换算为厘米（v3 扩展字段）
+        s.laser_cm = (env_.vl53_mm != serial_proto::VL53_OUT_OF_RANGE)
+                       ? static_cast<uint16_t>(env_.vl53_mm / 10) : 0;
+    }
+    // 蜂鸣器：F4 实鸣状态 或 上位机执行器回显
+    s.buzzer = ((envValid && (env_.flags & serial_proto::ENV_FLAG_BUZZER)) ||
+                actuators_.buzzer) ? 1 : 0;
+
+    // ---- 风险等级：前方距离 与 环境报警 取较高者 ----
     uint16_t d = telem_.dist_cm;
-    if      (d != 0 && d < av_.stopDistCm) s.risk_level = 3;   // 危险
-    else if (d != 0 && d < av_.slowDistCm) s.risk_level = 2;   // 警告
-    else                                   s.risk_level = 0;   // 安全
+    uint8_t distRisk = (d != 0 && d < av_.stopDistCm) ? 3
+                     : (d != 0 && d < av_.slowDistCm) ? 2 : 0;
+    uint8_t envRisk = 0;
+    if (envValid) {
+        if      (env_.alarm == serial_proto::ALARM_LV_FIRE) envRisk = 3;  // 火焰/气体
+        else if (env_.alarm == serial_proto::ALARM_LV_WARN) envRisk = 2;  // 障碍确认/警告
+    }
+    s.risk_level = distRisk > envRisk ? distRisk : envRisk;
 }
 
 RobotMode RobotController::mode() const {

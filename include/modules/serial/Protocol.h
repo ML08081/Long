@@ -19,6 +19,10 @@
 //    · 扩展遥测帧（本工程新增，携带超声波距离 + 编码器）：
 //        [0]=0xAA [1]=0x5A(EXT) [2]=LEN(=15) [3..]=payload [末]=XOR(0..2+LEN)
 //        payload(15B，大端)：spd i16 | str i16 | mode u8 | dist_cm u16 | enc1 i32 | enc2 i32
+//    · 环境/安全遥测帧（本工程新增，携带气体/激光测距/温湿度/报警）：
+//        [0]=0xAA [1]=0x5C(ENV) [2]=LEN(=8) [3..]=payload [末]=XOR(0..2+LEN)
+//        payload(8B，大端)：gas_raw u16 | vl53_mm u16 | temp i8 | humi u8 | flags u8 | alarm u8
+//    · 热成像行帧：[0]=0xAA [1]=0x5B(THERMAL) [2]=row [3..]=32*i16 BE [末]=XOR，共 68 字节
 // ==========================================================================
 
 namespace patrol {
@@ -27,10 +31,29 @@ namespace serial_proto {
 constexpr uint8_t HEADER          = 0xAA;
 constexpr uint8_t EXT_MARKER      = 0x5A;   // 扩展遥测帧第二字节
 constexpr uint8_t THERMAL_MARKER  = 0x5B;   // 热成像行帧第二字节
+constexpr uint8_t ENV_MARKER      = 0x5C;   // 环境/安全遥测帧第二字节
 constexpr uint8_t TELEMETRY_FLAG  = 0x80;   // 旧遥测帧 mode 的 bit7
 constexpr uint8_t CMD_FRAME_LEN   = 7;
 constexpr uint8_t EXT_PAYLOAD_LEN = 15;
 constexpr uint8_t EXT_FRAME_LEN   = 3 + EXT_PAYLOAD_LEN + 1;  // = 19
+constexpr uint8_t ENV_PAYLOAD_LEN = 8;
+constexpr uint8_t ENV_FRAME_LEN   = 3 + ENV_PAYLOAD_LEN + 1;  // = 12
+
+// 环境帧 flags 位（与 F4 protocol.h ENV_FLAG_* 完全一致）
+constexpr uint8_t ENV_FLAG_GAS      = 0x01;   // 气体浓度超阈值
+constexpr uint8_t ENV_FLAG_FLAME    = 0x02;   // 火焰检测
+constexpr uint8_t ENV_FLAG_DHT_OK   = 0x04;   // 温湿度有效
+constexpr uint8_t ENV_FLAG_VL53_OK  = 0x08;   // 激光测距有效
+constexpr uint8_t ENV_FLAG_OBSTACLE = 0x10;   // 障碍确认（VL53 与超声波双重验证）
+constexpr uint8_t ENV_FLAG_BUZZER   = 0x20;   // 蜂鸣器鸣响中
+
+// 报警等级（环境帧 alarm 字节）
+constexpr uint8_t ALARM_LV_NONE = 0;
+constexpr uint8_t ALARM_LV_WARN = 1;
+constexpr uint8_t ALARM_LV_FIRE = 2;
+
+// VL53L0X 无效/超量程标记（mm，与 F4 vl53l0x.h 一致）
+constexpr uint16_t VL53_OUT_OF_RANGE = 8190;
 
 // 热成像（MLX90640 32x24，分行传输）
 constexpr int THERMAL_COLS    = 32;
@@ -54,6 +77,17 @@ struct Telemetry {
     int32_t  enc1        = 0;
     int32_t  enc2        = 0;
     bool     hasDistance = false;  // true=来自扩展帧(dist/enc 有效); false=旧 7 字节遥测
+};
+
+// 环境/安全遥测解析结果（来自 0x5C 帧）
+struct EnvData {
+    uint16_t gas_raw = 0;      // MQ2 原始 ADC（0~4095，越大越浓）
+    uint16_t vl53_mm = 0;      // VL53L0X 激光测距(mm)，==VL53_OUT_OF_RANGE 表示无效
+    int8_t   temp_c  = 0;      // DHT11 温度(°C)
+    uint8_t  humi    = 0;      // DHT11 湿度(%RH)
+    uint8_t  flags   = 0;      // ENV_FLAG_* 位组合
+    uint8_t  alarm   = 0;      // 0=正常 1=警告 2=报警
+    bool     valid   = false;  // 是否已收到过有效环境帧
 };
 
 // XOR 校验（与 F4 Protocol_CalculateChecksum 一致）
