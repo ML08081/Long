@@ -55,11 +55,15 @@ public:
     //   返回值：>=0 本次读到的字节数；-1 对端关闭；-2 读错误。
     static int pollCommands(int fd, std::vector<uint8_t>& buf,
                             std::vector<net::Command>& cmds,
-                            std::vector<net::DriveCommand>& drives);
+                            std::vector<net::DriveCommand>& drives,
+                            std::vector<net::VisionResult>& visions);
 
     static void closeClient(int fd);
 
 private:
+    // 配置已 accept 的客户端 socket：TCP_NODELAY + keepalive + 发送超时（连接稳定性）
+    static void configureClientSocket(int fd);
+
     int listenFd_ = -1;
 };
 

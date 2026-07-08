@@ -39,6 +39,21 @@ bool ConfigManager::load(const std::string& path) {
     if (ser.is_object()) {
         serial_.device = ser["device"].string_or(serial_.device);
         serial_.baud   = static_cast<int>(ser["baud"].int_or(serial_.baud));
+        serial_.thermalDevice = ser["thermal_device"].string_or(serial_.thermalDevice);
+        serial_.thermalBaud   = static_cast<int>(ser["thermal_baud"].int_or(serial_.thermalBaud));
+    }
+
+    const json::JsonNode& disp = root["display"];
+    if (disp.is_object()) {
+        display_.enabled  = disp["enabled"].int_or(display_.enabled ? 1 : 0) != 0;
+        display_.spiDev   = disp["spi_device"].string_or(display_.spiDev);
+        display_.gpioDC   = static_cast<int>(disp["gpio_dc"].int_or(display_.gpioDC));
+        display_.gpioRST  = static_cast<int>(disp["gpio_rst"].int_or(display_.gpioRST));
+        display_.gpioBL   = static_cast<int>(disp["gpio_bl"].int_or(display_.gpioBL));
+        display_.width    = static_cast<int>(disp["width"].int_or(display_.width));
+        display_.height   = static_cast<int>(disp["height"].int_or(display_.height));
+        display_.spiHz    = static_cast<int>(disp["spi_hz"].int_or(display_.spiHz));
+        display_.rotation = static_cast<int>(disp["rotation"].int_or(display_.rotation));
     }
 
     LOG_INFO("配置加载完成: cam=%s %dx%d@%dfps | net=%s:%u | serial=%s@%d",

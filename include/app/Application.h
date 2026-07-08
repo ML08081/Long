@@ -8,6 +8,7 @@
 
 #include "modules/camera/CameraManager.h"
 #include "modules/network/TcpServer.h"
+#include "modules/display/St7789Display.h"
 #include "business/RobotController.h"
 
 // =============================================================================
@@ -28,6 +29,11 @@ struct AppConfig {
     // 下位机 F4 串口
     std::string serialDevice = "/dev/ttyS1";
     int         serialBaud   = 115200;
+    // 热成像专用串口（F4 USART1 → 龙芯此口）
+    std::string serialThermalDevice = "/dev/ttyS2";
+    int         serialThermalBaud   = 115200;
+    // SPI 状态小屏（ST7789，默认关闭）
+    St7789Display::Config display;
 };
 
 class Application {
@@ -41,6 +47,7 @@ public:
 private:
     void serveClient(int clientFd);
     void controlLoop();     // 控制线程：串口遥测 + 避障 + 下发命令
+    void displayLoop();     // 显示线程：定时把状态渲染到 SPI 小屏
 
     // 可被停止请求打断的睡眠；返回 false 表示期间收到退出请求
     bool interruptibleSleep(int totalMs);
@@ -52,7 +59,9 @@ private:
     CameraManager     camera_;
     TcpServer         server_;
     RobotController   robot_;
+    St7789Display     display_;
     std::thread       controlThread_;
+    std::thread       displayThread_;
     std::atomic<bool> running_{true};
 };
 

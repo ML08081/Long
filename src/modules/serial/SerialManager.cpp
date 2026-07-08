@@ -129,6 +129,31 @@ void SerialManager::poll() {
                 cb_(t);
             }
             off += need;
+        } else if (base[1] == RAW_THERM_MARKER || base[1] == EEPROM_MARKER) {
+            // ---- 原始热成像 / EEPROM 分块: [AA][MARK][idx][cnt][cnt*2 BE][XOR] ----
+            if (size - off < 4) break;                 // 需要 idx,cnt
+            uint8_t idx = base[2];
+            uint8_t cnt = base[3];
+            size_t  need = static_cast<size_t>(4) + static_cast<size_t>(cnt) * 2 + 1;
+            if (size - off < need) break;              // 半包
+            uint8_t crc = xorChecksum(base, 4 + cnt * 2);
+            if (crc != base[need - 1]) { ++off; continue; }  // 失步
+
+            const bool isEe = (base[1] == EEPROM_MARKER);
+            const int total = isEe ? MLX_EE_WORDS : MLX_FRAME_WORDS;
+            uint16_t* dst   = isEe ? eeAsm_ : rawAsm_;
+            const uint8_t* p = base + 3 + 1;           // 跳过 idx,cnt
+            int startWord = static_cast<int>(idx) * MLX_CHUNK_WORDS;
+            for (int i = 0; i < cnt; ++i) {
+                int w = startWord + i;
+                if (w < total) dst[w] = rdU16(p + i * 2);
+            }
+            // 该块的末字覆盖到总长 => 一整份组装完成
+            if (startWord + cnt >= total) {
+                if (isEe) { if (eepromCb_)     eepromCb_(eeAsm_, MLX_EE_WORDS); }
+                else      { if (rawThermalCb_) rawThermalCb_(rawAsm_, MLX_FRAME_WORDS); }
+            }
+            off += need;
         } else if (base[1] == ENV_MARKER) {
             // ---- 环境/安全遥测帧: [AA][5C][LEN][payload...][XOR] ----
             if (size - off < 3) break;                 // 需要 LEN

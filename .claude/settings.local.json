@@ -100,7 +100,9 @@
       "Read(//f/QT/Tools/**)",
       "Bash(cat \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\opPJ\\\\PatrolSystem\\\\config\\\\config.json\")",
       "Bash(grep -nA8 \"void HardFault_Handler|void MemManage_Handler|void BusFault_Handler|void UsageFault_Handler\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/stm32f4xx_it.c\")",
-      "Bash(grep -nA6 \"void UART_Log|UART_Log\\\\\\(\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/usart.c\")"
+      "Bash(grep -nA6 \"void UART_Log|UART_Log\\\\\\(\" \"F:/projectForXN/NGFXM/F4_VGT6first/Core/Src/usart.c\")",
+      "Bash(ls \"F:/projectForXN/NGFXM\")",
+      "PowerShell($paths = @\\(\"F:\\\\QT\\\\6.11.0\\\\mingw_64\\\\bin\\\\qmake.exe\",\"F:\\\\QT\\\\5.15.2\\\\mingw81_64\\\\bin\\\\qmake.exe\"\\); foreach\\($p in $paths\\){ if\\(Test-Path $p\\){ Write-Output \"FOUND: $p\" } else { Write-Output \"MISSING: $p\" } }; Get-ChildItem F:\\\\QT -Directory -ErrorAction SilentlyContinue | Select-Object Name)"
     ]
   }
 }

@@ -35,6 +35,15 @@ enum FrameType : uint8_t {
     FRAME_COMMAND = 0x40,   // 前端→龙芯 下行命令：payload = [cmdId u8][value u8]
     FRAME_DRIVE   = 0x41,   // 前端→龙芯 手动驱动：payload = [speed i16 LE][steering i16 LE]
                             //   龙芯据此切 MANUAL 并转发同步命令给 F4（链路验证/手动操控）
+    FRAME_VISION  = 0x42,   // 前端→龙芯 视觉识别结果（上位机对视频流做 YOLO 分析后回传，
+                            //   由龙芯"大脑"纳入判断）：payload =
+                            //   [count u8][maxConf u8(0~100)][flags u8][nameLen u8][name UTF-8...]
+};
+
+// 视觉结果标志位（上位机识别到的关注目标）
+enum VisionFlag : uint8_t {
+    VIS_PERSON = 0x01,   // 检测到人
+    VIS_FIRE   = 0x02,   // 检测到火焰/火源
 };
 
 // 下行命令 ID（执行与联动模块控制）
@@ -165,6 +174,14 @@ struct Command {
 struct DriveCommand {
     int16_t speed    = 0;   // -1000~+1000
     int16_t steering = 0;   // -1000~+1000
+};
+
+// 解析出的视觉识别结果（FRAME_VISION）：上位机对视频流分析后回传，供龙芯判断
+struct VisionResult {
+    uint8_t     count   = 0;    // 检测目标数
+    uint8_t     maxConf = 0;    // 最高置信度 0~100
+    uint8_t     flags   = 0;    // VisionFlag 位（VIS_PERSON/VIS_FIRE...）
+    std::string topClass;       // 最高分目标类别名
 };
 
 } // namespace net

@@ -6,7 +6,7 @@
 #  生成部署包:            bash scripts/make_package.sh
 # =============================================================================
 cmake_minimum_required(VERSION 3.10)
-project(PatrolSystem LANGUAGES CXX)
+project(PatrolSystem LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,8 @@ endif()
 add_compile_options(-Wall -Wextra)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 include_directories(${CMAKE_SOURCE_DIR}/include)
+# MLX90640 Melexis 官方 API（热成像解算下放龙芯）
+include_directories(${CMAKE_SOURCE_DIR}/third_party/mlx90640)
 
 # ---- 版本号（单一来源：根目录 VERSION 文件）------------------------------
 file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" PATROL_VERSION)
@@ -49,6 +51,12 @@ set(PATROL_SOURCES
     # 阶段二：串口 + 运动控制（F4 协议 / 距离避障）
     src/modules/serial/SerialManager.cpp
     src/business/RobotController.cpp
+    # SPI 状态小屏（ST7789，用户空间 spidev + sysfs GPIO）
+    src/modules/display/St7789Display.cpp
+    # 热成像解算（从 F4 下放到龙芯）：Melexis 官方 API + 平台桩 + C++ 封装
+    src/modules/thermal/ThermalSolver.cpp
+    third_party/mlx90640/MLX90640_API.c
+    third_party/mlx90640/MLX90640_I2C_Driver.c
 )
 
 # ---- 其余业务模块（后续接入后取消注释）----------------------------------
@@ -59,7 +67,7 @@ set(PATROL_SOURCES
 add_executable(patrol_system ${PATROL_SOURCES})
 
 find_package(Threads REQUIRED)
-target_link_libraries(patrol_system PRIVATE Threads::Threads)
+target_link_libraries(patrol_system PRIVATE Threads::Threads m)  # m: MLX90640 解算用 pow()
 
 option(BUILD_TESTS "构建链路集成测试 link_test" OFF)
 if(BUILD_TESTS)

@@ -1,6 +1,7 @@
 #include "app/Application.h"
 #include "modules/logger/Logger.h"
 #include "modules/network/FrameProtocol.h"
+#include "version.h"
 
 #include <chrono>
 #include <thread>
@@ -68,31 +69,30 @@ bool Application::healthCheck() {
 }
 
 int Application::run() {
-    LOG_INFO("==== PatrolSystem 启动 ====");
+    LOG_INFO("==== PatrolSystem 启动 (v%s) ====", versionString());
 
-    // 打开摄像头：开机时 USB 可能尚未枚举完成，采用可中断重试而非直接退出。
-    int attempt = 0;
-    while (running_.load() &&
-           !camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps)) {
-        ++attempt;
-        LOG_WARN("摄像头 %s 打开失败（第 %d 次），3 秒后重试...",
-                 cfg_.device.c_str(), attempt);
-        if (!interruptibleSleep(3000)) {
-            LOG_INFO("启动阶段收到退出请求");
-            return 0;
-        }
-    }
-    if (!running_.load()) return 0;
-
-    // 启动 TCP 监听（绑定 0.0.0.0 不依赖网卡是否已分配 IP）。
+    // ★网络优先：先启动 TCP 监听，再开摄像头。
+    //   （旧逻辑先阻塞式重试打开摄像头，一旦板子开机时 UVC 未枚举好，会永远卡在这里
+    //     导致 TCP 从不监听、上位机"连不上"。网络是最关键链路，必须最先就绪。）
     if (!server_.listen(cfg_.port, cfg_.bindAddr)) {
         LOG_ERROR("TCP 监听失败");
-        camera_.close();
         return 1;
     }
 
     // 打开下位机 F4 串口（失败不致命，仅运动/避障不可用）
-    robot_.init(cfg_.serialDevice, cfg_.serialBaud);
+    robot_.init(cfg_.serialDevice, cfg_.serialBaud,
+                cfg_.serialThermalDevice, cfg_.serialThermalBaud);
+
+    // 打开摄像头：有限次数尝试（不阻塞网络）。失败也继续——上位机仍可连上看传感器/日志，
+    // serveClient 每次连接会再懒打开一次，摄像头晚就绪也能自动恢复视频。
+    for (int attempt = 1; attempt <= 3 && running_.load(); ++attempt) {
+        if (camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps)) break;
+        LOG_WARN("摄像头 %s 打开失败（第 %d/3 次）%s",
+                 cfg_.device.c_str(), attempt,
+                 attempt < 3 ? "，1 秒后重试..." : "，暂无视频，连接后按需重试");
+        if (attempt < 3 && !interruptibleSleep(1000)) return 0;
+    }
+    if (!running_.load()) return 0;
 
     // 启动健康检测
     healthCheck();
@@ -100,6 +100,10 @@ int Application::run() {
     // 启动控制线程（串口遥测 + 避障 + 下发命令），独立于上位机连接
     if (robot_.isOpen())
         controlThread_ = std::thread([this] { controlLoop(); });
+
+    // 启动 SPI 小屏显示线程（默认关闭；config.json display.enabled=true 开启）
+    if (display_.init(cfg_.display))
+        displayThread_ = std::thread([this] { displayLoop(); });
 
     while (running_.load()) {
         std::string peer;
@@ -113,6 +117,8 @@ int Application::run() {
     }
 
     if (controlThread_.joinable()) controlThread_.join();
+    if (displayThread_.joinable()) displayThread_.join();
+    display_.close();
     robot_.close();
     camera_.close();
     server_.close();
@@ -133,41 +139,69 @@ void Application::controlLoop() {
     LOG_INFO("控制线程退出");
 }
 
-void Application::serveClient(int clientFd) {
-    if (!camera_.startStreaming()) {
-        LOG_ERROR("启动取流失败");
-        return;
+// 显示线程：~1Hz 把最新巡检状态渲染到 SPI 小屏（独立于上位机连接）。
+void Application::displayLoop() {
+    LOG_INFO("显示线程启动（ST7789 SPI 小屏 @ ~1Hz）");
+    while (running_.load()) {
+        net::SensorData s;
+        robot_.fillSensorData(s);
+        display_.showStatus(s, robot_.statusLine());
+        if (!interruptibleSleep(1000)) break;
     }
+    LOG_INFO("显示线程退出");
+}
+
+void Application::serveClient(int clientFd) {
+    // 摄像头可缺失：未打开则懒打开一次（开机晚枚举也能恢复）。无摄像头也继续服务，
+    // 仍下发传感器/状态/热成像/日志，保证上位机能连上、看到数据，绝不因摄像头而拒连。
+    if (!camera_.isOpen())
+        camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps);
+    bool haveCam = camera_.isOpen() && camera_.startStreaming();
+    if (camera_.isOpen() && !haveCam)
+        LOG_WARN("启动取流失败，本次连接仅提供传感器/状态数据（无视频）");
 
     TcpServer::sendText(clientFd,
-        "PatrolSystem ready " +
-        std::to_string(camera_.width()) + "x" + std::to_string(camera_.height()) +
-        (camera_.isMjpeg() ? " MJPEG" : " RAW"));
+        haveCam
+            ? "PatrolSystem ready " + std::to_string(camera_.width()) + "x" +
+              std::to_string(camera_.height()) + (camera_.isMjpeg() ? " MJPEG" : " RAW")
+            : std::string("PatrolSystem ready (无摄像头，仅传感器/状态)"));
 
     std::vector<uint8_t> rxBuf;
     std::vector<net::Command> cmds;
     std::vector<net::DriveCommand> drives;
+    std::vector<net::VisionResult> visions;
     std::vector<int16_t> thermalBuf;   // 复用，减少分配
     uint32_t frameCount   = 0;
     uint32_t lastStatMs   = nowMs();
     uint32_t lastSensorMs = 0;
+    uint32_t lastStatusMs = 0;
     uint32_t grabFailCnt  = 0;
 
+    // 连接建立即发一次状态行，随后每 2s 一次 —— 上位机"龙芯日志"栏据此看链路/传感器/版本。
+    TcpServer::sendText(clientFd, robot_.statusLine());
+
     while (running_.load()) {
-        const uint8_t* data = nullptr;
-        size_t size = 0;
-        if (camera_.grabFrame(&data, &size, /*timeoutMs=*/1000)) {
-            grabFailCnt = 0;
-            if (size > 0) {
-                if (!TcpServer::sendFrame(clientFd, net::FRAME_VIDEO, data, size))
-                    break;
-                ++frameCount;
+        if (haveCam) {
+            const uint8_t* data = nullptr;
+            size_t size = 0;
+            if (camera_.grabFrame(&data, &size, /*timeoutMs=*/1000)) {
+                grabFailCnt = 0;
+                if (size > 0) {
+                    if (!TcpServer::sendFrame(clientFd, net::FRAME_VIDEO, data, size))
+                        break;
+                    ++frameCount;
+                }
+            } else {
+                // 摄像头掉线：不再断开连接，转为"仅传感器/状态"模式继续服务上位机
+                if (++grabFailCnt >= 5) {
+                    LOG_WARN("连续取帧失败，疑似摄像头掉线，转为仅传感器/状态模式（保持连接）");
+                    camera_.stopStreaming();
+                    haveCam = false;
+                }
             }
         } else {
-            if (++grabFailCnt >= 5) {
-                LOG_WARN("连续 %u 次取帧失败，疑似摄像头掉线，断开本次连接", grabFailCnt);
-                break;
-            }
+            // 无摄像头：小睡维持 ~50Hz 节奏，不空转占满 CPU；传感器/状态照常下发
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
         uint32_t t = nowMs();
@@ -202,9 +236,16 @@ void Application::serveClient(int clientFd) {
             }
         }
 
+        // 周期回发精简状态行给上位机的"龙芯日志"栏（含链路计数/传感器/风险/视觉）
+        if (t - lastStatusMs >= 2000) {
+            lastStatusMs = t;
+            if (!TcpServer::sendText(clientFd, robot_.statusLine())) break;
+        }
+
         cmds.clear();
         drives.clear();
-        int rc = TcpServer::pollCommands(clientFd, rxBuf, cmds, drives);
+        visions.clear();
+        int rc = TcpServer::pollCommands(clientFd, rxBuf, cmds, drives, visions);
         if (rc < 0) break;
         for (const auto& c : cmds) {
             LOG_INFO("下行命令: %s (0x%02X value=%u)", cmdName(c.cmdId), c.cmdId, c.value);
@@ -214,15 +255,19 @@ void Application::serveClient(int clientFd) {
             LOG_DEBUG("手动驱动: speed=%d steering=%d", d.speed, d.steering);
             robot_.driveManual(d.speed, d.steering);   // 上位机手动操控 -> 转发 F4
         }
+        for (const auto& v : visions)
+            robot_.setVision(v);         // 上位机视觉结果 -> 龙芯"大脑"纳入判断
 
-        if (t - lastStatMs >= 1000) {
-            LOG_INFO("推流: %u fps  %dx%d", frameCount, camera_.width(), camera_.height());
+        // 推流帧率日志降频到 5s，减少龙芯 console 刷屏
+        if (haveCam && t - lastStatMs >= 5000) {
+            LOG_INFO("推流: %.1f fps  %dx%d",
+                     frameCount / 5.0, camera_.width(), camera_.height());
             frameCount = 0;
             lastStatMs = t;
         }
     }
 
-    camera_.stopStreaming();
+    if (haveCam) camera_.stopStreaming();
 }
 
 } // namespace patrol

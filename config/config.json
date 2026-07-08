@@ -16,6 +16,20 @@
   "serial": {
     "device": "/dev/ttyS1",
     "baud": 115200,
-    "_note": "串口设备节点待硬件引脚确认后修改"
+    "thermal_device": "/dev/ttyS2",
+    "thermal_baud": 115200,
+    "_note": "device=控制/遥测(双向); thermal_device=热成像专线(F4 USART1→此口, 只收0x5B); 节点待硬件引脚确认"
+  },
+  "display": {
+    "enabled": 0,
+    "spi_device": "/dev/spidev1.0",
+    "gpio_dc": 40,
+    "gpio_rst": 41,
+    "gpio_bl": 42,
+    "width": 240,
+    "height": 320,
+    "spi_hz": 40000000,
+    "rotation": 0,
+    "_note": "GMT020-02 ST7789V 240x320。接好屏后把 enabled 改成 1；gpio_* 换成你实际接 DC/RST/BL 的 GPIO 号(sysfs 编号)。颜色反了删驱动里 0x21(INVON)；红蓝反了 MADCTL 加 0x08(BGR)"
   }
 }

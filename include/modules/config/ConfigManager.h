@@ -24,6 +24,22 @@ public:
     struct SerialConf {
         std::string device = "/dev/ttyS1";
         int         baud   = 115200;
+        // 热成像专用串口（双串口方案：F4 USART1 → 龙芯此口，仅收 0x5B 行帧）
+        std::string thermalDevice = "/dev/ttyS2";
+        int         thermalBaud   = 115200;
+    };
+
+    // SPI 状态小屏（ST7789，默认关闭）
+    struct DisplayConf {
+        bool        enabled = false;
+        std::string spiDev  = "/dev/spidev1.0";
+        int         gpioDC  = 40;
+        int         gpioRST = 41;
+        int         gpioBL  = 42;
+        int         width   = 240;
+        int         height  = 320;   // GMT020-02 (ST7789V) 原生 240x320
+        int         spiHz   = 40000000;
+        int         rotation = 0;
     };
 
     // 加载 JSON 文件。失败时保留默认值，返回 false。
@@ -35,6 +51,7 @@ public:
     const CameraConf&  camera()  const { return camera_; }
     const NetworkConf& network() const { return network_; }
     const SerialConf&  serial()  const { return serial_; }
+    const DisplayConf& display() const { return display_; }
 
     // 供 CLI 参数覆盖
     CameraConf&  camera()  { return camera_; }
@@ -45,6 +62,7 @@ private:
     CameraConf  camera_;
     NetworkConf network_;
     SerialConf  serial_;
+    DisplayConf display_;
 };
 
 } // namespace patrol

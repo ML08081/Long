@@ -30,8 +30,17 @@ namespace serial_proto {
 
 constexpr uint8_t HEADER          = 0xAA;
 constexpr uint8_t EXT_MARKER      = 0x5A;   // 扩展遥测帧第二字节
-constexpr uint8_t THERMAL_MARKER  = 0x5B;   // 热成像行帧第二字节
+constexpr uint8_t THERMAL_MARKER  = 0x5B;   // 热成像行帧第二字节(F4已解算, 旧路径, 保留兼容)
 constexpr uint8_t ENV_MARKER      = 0x5C;   // 环境/安全遥测帧第二字节
+constexpr uint8_t RAW_THERM_MARKER= 0x5D;   // 热成像"原始帧"分块(F4只转发, 龙芯解算, 新路径)
+constexpr uint8_t EEPROM_MARKER   = 0x5E;   // MLX90640 EEPROM 标定数据分块(上电发一次)
+
+// 原始热成像/EEPROM 分块帧: [AA][MARK][idx u8][cnt u8][cnt*2 字节 大端][XOR]
+//   idx=分块序号, cnt=本块字数; 目标数组偏移 = idx*MLX_CHUNK_WORDS。
+//   MLX90640 原始帧=834 字, EEPROM=832 字（Melexis 官方规格）。
+constexpr int MLX_EE_WORDS    = 832;
+constexpr int MLX_FRAME_WORDS = 834;
+constexpr int MLX_CHUNK_WORDS = 32;         // 每块 32 字=64 字节数据
 constexpr uint8_t TELEMETRY_FLAG  = 0x80;   // 旧遥测帧 mode 的 bit7
 constexpr uint8_t CMD_FRAME_LEN   = 7;
 constexpr uint8_t EXT_PAYLOAD_LEN = 15;

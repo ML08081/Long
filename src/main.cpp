@@ -101,6 +101,19 @@ int main(int argc, char** argv) {
     cfg.bindAddr = cfgmgr.network().bind;
     cfg.serialDevice = cfgmgr.serial().device;
     cfg.serialBaud   = cfgmgr.serial().baud;
+    cfg.serialThermalDevice = cfgmgr.serial().thermalDevice;
+    cfg.serialThermalBaud   = cfgmgr.serial().thermalBaud;
+    // SPI 小屏配置
+    const auto& dc = cfgmgr.display();
+    cfg.display.enabled = dc.enabled;
+    cfg.display.spiDev  = dc.spiDev;
+    cfg.display.gpioDC  = dc.gpioDC;
+    cfg.display.gpioRST = dc.gpioRST;
+    cfg.display.gpioBL  = dc.gpioBL;
+    cfg.display.width   = dc.width;
+    cfg.display.height  = dc.height;
+    cfg.display.spiHz   = static_cast<uint32_t>(dc.spiHz);
+    cfg.display.rotation = dc.rotation;
 
     bool        verbose = false;
     std::string logDir, logFile;

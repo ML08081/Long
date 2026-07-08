@@ -46,7 +46,9 @@ bool TcpServer::listen(uint16_t port, const std::string& bindAddr) {
         close();
         return false;
     }
-    if (::listen(listenFd_, 1) < 0) {
+    // backlog 提到 4：LongLook 断线重连时，旧连接可能尚未被检测到（仍在 serveClient），
+    // 新连接需要能进内核队列而不是被 RST 拒绝，避免"连接失败需重试几次"。
+    if (::listen(listenFd_, 4) < 0) {
         LOG_ERROR("listen 失败: %s", std::strerror(errno));
         close();
         return false;
@@ -90,9 +92,7 @@ int TcpServer::acceptClient(int timeoutMs, std::string* peerOut) {
         return -2;
     }
 
-    // 关闭 Nagle，降低视频帧延迟
-    int yes = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    configureClientSocket(fd);
 
     char ipstr[INET_ADDRSTRLEN] = {0};
     ::inet_ntop(AF_INET, &peer.sin_addr, ipstr, sizeof(ipstr));
@@ -100,6 +100,28 @@ int TcpServer::acceptClient(int timeoutMs, std::string* peerOut) {
     if (peerOut) *peerOut = peerDesc;
     LOG_INFO("上位机已连接: %s", peerDesc.c_str());
     return fd;
+}
+
+// 配置已 accept 的客户端 socket，核心解决"连接不稳定/重连失败"：
+//   1) TCP_NODELAY：关闭 Nagle，降低视频/命令延迟。
+//   2) SO_KEEPALIVE + 短探测周期：WiFi 下 LongLook 掉电/断网不会发 FIN，
+//      服务端若无 keepalive 会一直卡在 serveClient(旧连接) 里推流，新连接进不来。
+//      开启后 ~ (idle 5s + 3×2s) ≈ 11s 内探测到死连接并让 send 报错，serveClient 退出回到 accept。
+//   3) SO_SNDTIMEO：对端假死时内核发送缓冲写满会永久阻塞 send；设 5s 超时让 sendAll 报错跳出，
+//      不再让一个僵死连接独占服务端。
+void TcpServer::configureClientSocket(int fd) {
+    int yes = 1;
+    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,  &yes, sizeof(yes));
+    ::setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE, &yes, sizeof(yes));
+#ifdef TCP_KEEPIDLE
+    int idle = 5, intvl = 2, cnt = 3;
+    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+#endif
+    timeval snd{};
+    snd.tv_sec = 5;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
 }
 
 bool TcpServer::sendAll(int fd, const uint8_t* data, size_t len) {
@@ -112,7 +134,12 @@ bool TcpServer::sendAll(int fd, const uint8_t* data, size_t len) {
             continue;
         }
         if (n < 0 && (errno == EINTR)) continue;
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;  // 阻塞套接字一般不会到这
+        // 配了 SO_SNDTIMEO：EAGAIN/EWOULDBLOCK = 发送超时（对端假死缓冲写满），
+        // 视为失败跳出，让 serveClient 断开该僵死连接、回到 accept 迎接新连接。
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            LOG_WARN("发送超时，判定对端假死断开 (已发 %zu/%zu)", sent, len);
+            return false;
+        }
         LOG_WARN("发送失败 (已发 %zu/%zu): %s", sent, len, std::strerror(errno));
         return false;
     }
@@ -134,7 +161,8 @@ bool TcpServer::sendText(int fd, const std::string& text) {
 
 int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
                             std::vector<net::Command>& out,
-                            std::vector<net::DriveCommand>& drives) {
+                            std::vector<net::DriveCommand>& drives,
+                            std::vector<net::VisionResult>& visions) {
     // 非阻塞读取所有可用数据
     uint8_t tmp[512];
     int total = 0;
@@ -176,6 +204,16 @@ int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
             d.speed    = static_cast<int16_t>(uint16_t(p[0]) | (uint16_t(p[1]) << 8));
             d.steering = static_cast<int16_t>(uint16_t(p[2]) | (uint16_t(p[3]) << 8));
             drives.push_back(d);
+        } else if (type == net::FRAME_VISION && len >= 4) {
+            const uint8_t* p = buf.data() + off + net::LL_HEADER_SIZE;
+            net::VisionResult v;   // [count][maxConf][flags][nameLen][name...]
+            v.count   = p[0];
+            v.maxConf = p[1];
+            v.flags   = p[2];
+            uint8_t nameLen = p[3];
+            if (4u + nameLen <= len)
+                v.topClass.assign(reinterpret_cast<const char*>(p + 4), nameLen);
+            visions.push_back(v);
         }
         off += need;
     }
