@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <poll.h>
 
 namespace patrol {
 
@@ -61,14 +62,30 @@ void SerialManager::close() {
 }
 
 bool SerialManager::sendCommand(int16_t speed, int16_t steering, uint8_t mode) {
-    if (fd_ < 0) return false;
     auto frame = serial_proto::buildCommand(speed, steering, mode);
+    return sendFrame(frame.data(), frame.size());
+}
+
+bool SerialManager::sendFrame(const uint8_t* data, size_t len) {
+    if (fd_ < 0) return false;
     size_t sent = 0;
-    while (sent < frame.size()) {
-        ssize_t n = ::write(fd_, frame.data() + sent, frame.size() - sent);
-        if (n > 0) { sent += static_cast<size_t>(n); continue; }
-        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-        LOG_WARN("串口发送失败 (已发 %zu/%zu): %s", sent, frame.size(), std::strerror(errno));
+    int stalls = 0;
+    while (sent < len) {
+        ssize_t n = ::write(fd_, data + sent, len - sent);
+        if (n > 0) { sent += static_cast<size_t>(n); stalls = 0; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // 输出缓冲暂满：poll 等待可写(≤50ms)。连续多次仍写不进 → 判串口异常，
+            // 放弃本帧返回 false，绝不忙等卡死 30Hz 控制线程(丢一两帧命令有心跳窗口容忍)。
+            struct pollfd pfd; pfd.fd = fd_; pfd.events = POLLOUT; pfd.revents = 0;
+            ::poll(&pfd, 1, 50);
+            if (++stalls > 4) {
+                LOG_WARN("串口发送阻塞超时(已发 %zu/%zu)，丢弃本帧", sent, len);
+                return false;
+            }
+            continue;
+        }
+        LOG_WARN("串口发送失败 (已发 %zu/%zu): %s", sent, len, std::strerror(errno));
         return false;
     }
     return true;
@@ -152,6 +169,27 @@ void SerialManager::poll() {
             if (startWord + cnt >= total) {
                 if (isEe) { if (eepromCb_)     eepromCb_(eeAsm_, MLX_EE_WORDS); }
                 else      { if (rawThermalCb_) rawThermalCb_(rawAsm_, MLX_FRAME_WORDS); }
+            }
+            off += need;
+        } else if (base[1] == PID_TELE_MARKER) {
+            // ---- PID 调参遥测帧: [AA][62][LEN=23][payload...][XOR] ----
+            if (size - off < 3) break;                 // 需要 LEN
+            uint8_t len  = base[2];
+            size_t  need = static_cast<size_t>(3) + len + 1;
+            if (size - off < need) break;              // 半包
+            uint8_t crc = xorChecksum(base, 3 + len);
+            if (crc != base[need - 1]) { ++off; continue; }  // 失步
+
+            if (len >= PID_TELE_PAYLOAD && pidTeleCb_) {
+                const uint8_t* p = base + 3;
+                PidTele t;
+                t.seq   = rdU16(p + 0);
+                t.flags = p[2];
+                t.targL = rdI16(p + 3);  t.measL = rdI16(p + 5);  t.outL = rdI16(p + 7);
+                t.targR = rdI16(p + 9);  t.measR = rdI16(p + 11); t.outR = rdI16(p + 13);
+                t.enc1  = rdI32(p + 15);
+                t.enc2  = rdI32(p + 19);
+                pidTeleCb_(t);
             }
             off += need;
         } else if (base[1] == ENV_MARKER) {

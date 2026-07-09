@@ -11,6 +11,8 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>   // TIOCOUTQ：查内核发送队列已占用字节
+#include <sys/uio.h>     // sendmsg / iovec：头+负载一次发出
 
 namespace patrol {
 
@@ -114,13 +116,19 @@ void TcpServer::configureClientSocket(int fd) {
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,  &yes, sizeof(yes));
     ::setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE, &yes, sizeof(yes));
 #ifdef TCP_KEEPIDLE
-    int idle = 5, intvl = 2, cnt = 3;
+    // keepalive 放宽到 ~25s 才判死：弱网/短暂拥塞不误杀活连接（原 ~11s 过于激进）。
+    // 持续有小帧发送时连接不 idle，keepalive 基本不触发；仅真静默时兜底检测死连接。
+    int idle = 10, intvl = 3, cnt = 5;
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
 #endif
+    // 明确的发送缓冲：让 sendFrameDroppable 的"整帧放得下才发"判定有稳定依据。
+    int sndbuf = 256 * 1024;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    // 发送超时缩到 1s：仅作兜底（正常路径靠拥塞判定丢帧，不会走到阻塞超时）。
     timeval snd{};
-    snd.tv_sec = 5;
+    snd.tv_sec = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
 }
 
@@ -159,10 +167,62 @@ bool TcpServer::sendText(int fd, const std::string& text) {
                      reinterpret_cast<const uint8_t*>(text.data()), text.size());
 }
 
+// ★可丢弃发送：整帧发出 / 拥塞时整帧丢弃 / 真错误。核心=弱网下链路不因拥塞而断。
+TcpServer::SendStatus TcpServer::sendFrameDroppable(int fd, uint8_t type,
+                                                    const uint8_t* payload, size_t len) {
+    const size_t total = static_cast<size_t>(net::LL_HEADER_SIZE) + len;
+
+    // 1) 拥塞判定：整帧放不进内核发送缓冲剩余空间就【整帧丢弃】(绝不写一半损坏流)。
+    //    小帧(传感器/状态<1KB)只需极小空间→拥塞时仍能发出；大帧(视频)需大空间→拥塞时被丢。
+    //    这天然实现"弱网丢视频、保实时状态"，且链路始终不断。
+    int outq = 0;
+    if (::ioctl(fd, TIOCOUTQ, &outq) == 0) {
+        int sndbuf = 0; socklen_t sl = sizeof(sndbuf);
+        if (::getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl) == 0 && sndbuf > 0) {
+            // Linux 的 SO_SNDBUF 读回值约为实际 2 倍；留 1/4 余量避免边界部分写
+            if (static_cast<int>(total) > sndbuf * 3 / 4 - outq)
+                return SendStatus::Dropped;
+        }
+    }
+
+    // 2) 头+负载一次 sendmsg 发出（空间已确认→立即全量拷入内核并返回）。
+    uint8_t hdr[net::LL_HEADER_SIZE];
+    net::buildHeader(type, static_cast<uint32_t>(len), hdr);
+    iovec iov[2];
+    iov[0].iov_base = hdr;                            iov[0].iov_len = sizeof(hdr);
+    iov[1].iov_base = const_cast<uint8_t*>(payload);  iov[1].iov_len = len;
+    msghdr msg{};
+    msg.msg_iov    = iov;
+    msg.msg_iovlen = (len > 0) ? 2 : 1;
+
+    ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
+    if (n == static_cast<ssize_t>(total)) return SendStatus::Sent;
+    if (n < 0) {
+        // SO_SNDTIMEO 兜底超时(对端假死缓冲满) → 丢弃本帧但保持连接
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            return SendStatus::Dropped;
+        return SendStatus::Error;   // EPIPE/ECONNRESET 等 → 对端真断了
+    }
+    // 3) 罕见部分写(空间已查基本不会发生)：剩余有限阻塞补齐，保证帧不被截断。
+    std::vector<uint8_t> whole;
+    whole.reserve(total);
+    whole.insert(whole.end(), hdr, hdr + sizeof(hdr));
+    if (len > 0) whole.insert(whole.end(), payload, payload + len);
+    if (!sendAll(fd, whole.data() + n, total - static_cast<size_t>(n)))
+        return SendStatus::Error;
+    return SendStatus::Sent;
+}
+
+TcpServer::SendStatus TcpServer::sendTextDroppable(int fd, const std::string& text) {
+    return sendFrameDroppable(fd, net::FRAME_TEXT,
+                              reinterpret_cast<const uint8_t*>(text.data()), text.size());
+}
+
 int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
                             std::vector<net::Command>& out,
                             std::vector<net::DriveCommand>& drives,
-                            std::vector<net::VisionResult>& visions) {
+                            std::vector<net::VisionResult>& visions,
+                            std::vector<net::PidCommand>& pids) {
     // 非阻塞读取所有可用数据
     uint8_t tmp[512];
     int total = 0;
@@ -214,6 +274,31 @@ int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
             if (4u + nameLen <= len)
                 v.topClass.assign(reinterpret_cast<const char*>(p + 4), nameLen);
             visions.push_back(v);
+        } else if (type == net::FRAME_PID_CMD && len >= 1) {
+            const uint8_t* p = buf.data() + off + net::LL_HEADER_SIZE;
+            auto rdU16le = [&](int i) { return uint16_t(p[i]) | (uint16_t(p[i+1]) << 8); };
+            auto rdU32le = [&](int i) {
+                return uint32_t(p[i]) | (uint32_t(p[i+1]) << 8) |
+                       (uint32_t(p[i+2]) << 16) | (uint32_t(p[i+3]) << 24);
+            };
+            net::PidCommand pc;
+            pc.sub = p[0];
+            if (pc.sub == 1 && len >= 1 + 15) {
+                // 参数: kp/ki/kd_x1000 u32×3 | max_delta u16 | flags u8
+                pc.kp = rdU32le(1)  / 1000.0f;
+                pc.ki = rdU32le(5)  / 1000.0f;
+                pc.kd = rdU32le(9)  / 1000.0f;
+                pc.maxDelta   = rdU16le(13);
+                pc.closedLoop = (p[15] & 0x01) != 0;
+                pids.push_back(pc);
+            } else if (pc.sub == 2 && len >= 1 + 7) {
+                // 测试: mode u8 | left i16 | right i16 | duration_ms u16
+                pc.testMode   = p[1];
+                pc.left       = static_cast<int16_t>(rdU16le(2));
+                pc.right      = static_cast<int16_t>(rdU16le(4));
+                pc.durationMs = rdU16le(6);
+                pids.push_back(pc);
+            }
         }
         off += need;
     }

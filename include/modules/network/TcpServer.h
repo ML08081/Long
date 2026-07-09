@@ -50,13 +50,24 @@ public:
     // 发送一段 UTF-8 文本作为 FRAME_TEXT
     static bool sendText(int fd, const std::string& text);
 
-    // 非阻塞读取并解析对端发来的下行帧：命令(0x40) 追加到 cmds，手动驱动(0x41) 追加到 drives。
+    // 发送结果三态：区分"发出/因拥塞丢弃/真错误"。丢弃时保持连接。
+    enum class SendStatus { Sent, Dropped, Error };
+    // ★可丢弃发送：整帧要么完整发出，要么在内核发送缓冲不足时整帧丢弃
+    //   （绝不阻塞、绝不断链、绝不把帧写一半损坏 TCP 流）。
+    //   适用于视频/热成像/传感器/状态等周期帧——弱网下丢大帧保小帧，链路不因拥塞而断。
+    static SendStatus sendFrameDroppable(int fd, uint8_t type, const uint8_t* payload, size_t len);
+    // 文本状态行的可丢弃版本
+    static SendStatus sendTextDroppable(int fd, const std::string& text);
+
+    // 非阻塞读取并解析对端发来的下行帧：命令(0x40)→cmds，手动驱动(0x41)→drives，
+    //   视觉(0x42)→visions，PID 调试(0x43)→pids。
     //   buf 为该连接的累积缓冲区（调用方持有，跨调用保留半包）。
     //   返回值：>=0 本次读到的字节数；-1 对端关闭；-2 读错误。
     static int pollCommands(int fd, std::vector<uint8_t>& buf,
                             std::vector<net::Command>& cmds,
                             std::vector<net::DriveCommand>& drives,
-                            std::vector<net::VisionResult>& visions);
+                            std::vector<net::VisionResult>& visions,
+                            std::vector<net::PidCommand>& pids);
 
     static void closeClient(int fd);
 

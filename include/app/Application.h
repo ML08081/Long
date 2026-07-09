@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -48,6 +49,8 @@ private:
     void serveClient(int clientFd);
     void controlLoop();     // 控制线程：串口遥测 + 避障 + 下发命令
     void displayLoop();     // 显示线程：定时把状态渲染到 SPI 小屏
+    void discoveryLoop();   // 发现线程：UDP 广播龙芯自身 IP，供上位机自动发现/重连
+    St7789Display::RelayInfo buildRelayInfo();  // 汇总"中转状态页"信息
 
     // 可被停止请求打断的睡眠；返回 false 表示期间收到退出请求
     bool interruptibleSleep(int totalMs);
@@ -62,7 +65,18 @@ private:
     St7789Display     display_;
     std::thread       controlThread_;
     std::thread       displayThread_;
+    std::thread       discoveryThread_;
     std::atomic<bool> running_{true};
+
+    // 上位机连接状态（供 SPI 小屏"中转状态页"显示；网络线程写，显示线程读）
+    std::atomic<bool>     upperOnline_{false};
+    std::atomic<uint32_t> upperSinceMs_{0};   // 本次连接建立时刻(ms)
+    std::mutex            upperMtx_;
+    std::string           upperPeer_;         // 对端 IP:port
+    uint32_t              startMs_ = 0;        // 进程启动时刻(ms)，算运行时长
+
+    // PID 测试期间静默热成像的截止时刻(ms)：接收线程写、上报线程读。
+    std::atomic<uint32_t> pidHushThermalUntil_{0};
 };
 
 } // namespace patrol

@@ -21,15 +21,15 @@
     "_note": "device=控制/遥测(双向); thermal_device=热成像专线(F4 USART1→此口, 只收0x5B); 节点待硬件引脚确认"
   },
   "display": {
-    "enabled": 0,
+    "enabled": 1,
     "spi_device": "/dev/spidev1.0",
-    "gpio_dc": 40,
-    "gpio_rst": 41,
-    "gpio_bl": 42,
+    "gpio_dc": 72,
+    "gpio_rst": 73,
+    "gpio_bl": 74,
     "width": 240,
     "height": 320,
     "spi_hz": 40000000,
     "rotation": 0,
-    "_note": "GMT020-02 ST7789V 240x320。接好屏后把 enabled 改成 1；gpio_* 换成你实际接 DC/RST/BL 的 GPIO 号(sysfs 编号)。颜色反了删驱动里 0x21(INVON)；红蓝反了 MADCTL 加 0x08(BGR)"
+    "_note": "GMT020-02 ST7789V 240x320 接 2K0300 IO排针: SCL=PIN21(SPI2_CLK) SDA=PIN27(SPI2_MOSI) CS=PIN23(SPI2_CSn) VCC=PIN2(3.3V,勿接PIN30=5V) GND=PIN1。DC=PIN7=GPIO72(CAN2_TX) RST=PIN9=GPIO73(CAN2_RX) BL=PIN11=GPIO74(CAN3_TX),三者sysfs实测可用。颜色反删驱动0x21(INVON);红蓝反MADCTL加0x08(BGR);方向改rotation"
   }
 }

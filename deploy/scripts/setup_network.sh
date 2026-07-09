@@ -35,21 +35,28 @@ if ! ip link show "$IFACE" >/dev/null 2>&1; then
     exit 0
 fi
 
-# 2) 若配置了 SSID，据此生成 wpa_supplicant.conf（单一来源）
-if [ -n "$WIFI_SSID" ]; then
-    log "生成 $WPA_CONF (SSID=$WIFI_SSID)"
-    cat > "$WPA_CONF" <<EOF
-ctrl_interface=/var/run/wpa_supplicant
-update_config=1
-
-network={
-    ssid="$WIFI_SSID"
-    psk="$WIFI_PASSWORD"
-    key_mgmt=WPA-PSK
-    scan_ssid=1
+# 2) 生成 wpa_supplicant.conf（B410 + MLML 双网络，priority 自动择优/failover：
+#    优先连 priority 高且可用的；断开自动切另一个）
+log "生成 $WPA_CONF (主=$WIFI_SSID  次=${WIFI_SSID2:-无})"
+{
+    echo "ctrl_interface=/var/run/wpa_supplicant"
+    echo "update_config=1"
+} > "$WPA_CONF"
+add_network(){   # $1=ssid $2=psk $3=priority
+    [ -n "$1" ] || return 0
+    {
+        echo ""
+        echo "network={"
+        echo "    ssid=\"$1\""
+        echo "    psk=\"$2\""
+        echo "    key_mgmt=WPA-PSK"
+        echo "    priority=$3"
+        echo "    scan_ssid=1"
+        echo "}"
+    } >> "$WPA_CONF"
 }
-EOF
-fi
+add_network "$WIFI_SSID"  "$WIFI_PASSWORD"  "${WIFI_PRIORITY:-5}"
+add_network "$WIFI_SSID2" "$WIFI_PASSWORD2" "${WIFI_PRIORITY2:-1}"
 
 # 3) 整体连接尝试（最多 2 轮）
 connected=0
@@ -99,15 +106,19 @@ done
 
 [ "$connected" = "1" ] || log "警告: WiFi 关联失败（检查 SSID=$WIFI_SSID / 密码 / 信号强度）"
 
-# 4) 配置 IP：固定 IP 优先，否则 DHCP
-if [ -n "$STATIC_IP" ]; then
-    log "设置固定 IP: $STATIC_IP/$NETMASK  网关=${GATEWAY:-无}"
+# 4) 配置 IP：当前连的是 STATIC_SSID(B410) 才用固定 IP；否则(手机热点等异网段) 用 DHCP。
+#    跨网段固定 IP 不通，故按“当前关联 SSID”自适应选择。
+CUR_SSID=$(wpa_cli -i "$IFACE" status 2>/dev/null | sed -n 's/^ssid=//p' | head -1)
+log "当前关联 SSID: ${CUR_SSID:-未知}"
+if [ -n "$STATIC_IP" ] && [ -n "$STATIC_SSID" ] && [ "$CUR_SSID" = "$STATIC_SSID" ]; then
+    log "连的是 $STATIC_SSID → 固定 IP: $STATIC_IP/$NETMASK  网关=${GATEWAY:-无}"
     ip addr flush dev "$IFACE" 2>/dev/null || true
     ip addr add "$STATIC_IP/$NETMASK" dev "$IFACE"
     ip link set "$IFACE" up 2>/dev/null || true
     [ -n "$GATEWAY" ] && ip route replace default via "$GATEWAY" dev "$IFACE" 2>/dev/null || true
 else
-    log "DHCP 获取 IP"
+    log "连的是 ${CUR_SSID:-其它网络}(非 $STATIC_SSID) → DHCP 自动获取 IP（上位机靠 UDP 自动发现）"
+    ip addr flush dev "$IFACE" 2>/dev/null || true
     udhcpc -b -i "$IFACE" -t 8 -T 2 2>/dev/null || true
     sleep 2
 fi

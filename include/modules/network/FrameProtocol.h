@@ -38,6 +38,25 @@ enum FrameType : uint8_t {
     FRAME_VISION  = 0x42,   // 前端→龙芯 视觉识别结果（上位机对视频流做 YOLO 分析后回传，
                             //   由龙芯"大脑"纳入判断）：payload =
                             //   [count u8][maxConf u8(0~100)][flags u8][nameLen u8][name UTF-8...]
+    FRAME_PID_TELE = 0x22,  // 龙芯→前端 PID 调参遥测（转发 F4 0x62，payload 小端 23B）：
+                            //   seq u16 | flags u8 | targL i16 measL i16 outL i16
+                            //   | targR i16 measR i16 outR i16 | enc1 i32 | enc2 i32
+    FRAME_PID_CMD  = 0x43,  // 前端→龙芯 PID 调试命令（龙芯翻译成 F4 0x60/0x61，小端）：
+                            //   [sub u8] sub=1 参数: kp/ki/kd_x1000 u32×3 | max_delta u16 | flags u8
+                            //            sub=2 测试: mode u8 | left i16 | right i16 | duration_ms u16
+};
+
+// PID 调试命令解析结果（FRAME_PID_CMD）
+struct PidCommand {
+    uint8_t  sub      = 0;      // 1=参数 2=测试
+    // sub=1
+    float    kp = 0, ki = 0, kd = 0;
+    uint16_t maxDelta = 0;
+    bool     closedLoop = false;
+    // sub=2
+    uint8_t  testMode = 0;      // 0停/1开环PWM/2闭环目标
+    int16_t  left = 0, right = 0;
+    uint16_t durationMs = 0;
 };
 
 // 视觉结果标志位（上位机识别到的关注目标）

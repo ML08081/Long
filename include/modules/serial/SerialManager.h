@@ -22,6 +22,8 @@ public:
     using RawThermalCallback = std::function<void(const uint16_t* raw, int words)>;
     // 收到完整 MLX90640 EEPROM(832 字)后回调（一次性，用于提取标定参数）
     using EepromCallback = std::function<void(const uint16_t* ee, int words)>;
+    // 收到 PID 调参遥测帧(0x62)后回调
+    using PidTeleCallback = std::function<void(const serial_proto::PidTele&)>;
 
     SerialManager() = default;
     ~SerialManager();
@@ -38,9 +40,13 @@ public:
     void setEnvCallback(EnvCallback cb) { envCb_ = std::move(cb); }
     void setRawThermalCallback(RawThermalCallback cb) { rawThermalCb_ = std::move(cb); }
     void setEepromCallback(EepromCallback cb) { eepromCb_ = std::move(cb); }
+    void setPidTeleCallback(PidTeleCallback cb) { pidTeleCb_ = std::move(cb); }
 
     // 发送命令帧（龙芯 -> F4）。speed/steering 会被限幅到 [-1000,1000]。
     bool sendCommand(int16_t speed, int16_t steering, uint8_t mode);
+
+    // 发送任意已打包协议帧（PID 参数/测试帧等；调用方须保证只在控制线程使用）
+    bool sendFrame(const uint8_t* data, size_t len);
 
     // 主循环调用：读取串口数据并解析遥测帧，对每个完整帧调用回调
     void poll();
@@ -52,6 +58,7 @@ private:
     EnvCallback             envCb_;
     RawThermalCallback      rawThermalCb_;
     EepromCallback          eepromCb_;
+    PidTeleCallback         pidTeleCb_;
     std::vector<uint8_t>    rxBuf_;
     int16_t                 thermalBuf_[serial_proto::THERMAL_PIXELS] = {0};  // 行组装缓冲
     // 原始热成像帧 / EEPROM 分块组装缓冲

@@ -47,6 +47,11 @@ public:
     // 上位机对视频流做视觉识别后回传的结果（龙芯"大脑"纳入判断）
     void setVision(const net::VisionResult& v);
 
+    // 上位机 PID 调试命令（FRAME_PID_CMD）：排队，由控制线程 tick() 打包 0x60/0x61 下发 F4。
+    void setPidCommand(const net::PidCommand& pc);
+    // 取走积累的 PID 调参遥测(F4 0x62)，供 serveClient 转发 FRAME_PID_TELE；返回取到条数。
+    size_t takePidTele(std::vector<serial_proto::PidTele>& out);
+
     // 生成一行精简状态（版本/RX链路计数/关键传感器/风险/视觉），
     // 既用于龙芯本地精简日志，也经 FRAME_TEXT 发给上位机的"龙芯日志"栏。
     std::string statusLine() const;
@@ -61,6 +66,21 @@ public:
     // 把最新 F4 遥测 + 机器人状态填入发给上位机的 SensorData
     void fillSensorData(net::SensorData& s) const;
 
+    // 中转/链路状态快照（供 SPI 小屏"中转状态页"显示）：各链路计数、新鲜度、视觉、热点。
+    struct LinkStatus {
+        bool        f4Open        = false;
+        uint32_t    telemCnt      = 0, envCnt = 0, thermalCnt = 0;
+        bool        telemFresh    = false;   // 近 2s 收到遥测帧
+        bool        envFresh      = false;   // 近 2s 收到环境帧
+        bool        visionActive  = false;   // 近 3s 有上位机视觉结果
+        uint8_t     visionCount   = 0;
+        uint8_t     visionConf    = 0;        // 最高置信度 0~100
+        std::string visionName;               // 最高分类别
+        int         thermalMaxC10 = -1000;    // 热成像最高温 ×10°C，-1000=无
+        bool        hotspot       = false;    // 热点告警
+    };
+    LinkStatus linkStatus() const;
+
     // 取出最新热成像帧（若自上次取用后有新帧）。有新帧返回 true 并填 out/cols/rows。
     bool takeThermal(std::vector<int16_t>& out, int& cols, int& rows);
 
@@ -72,6 +92,7 @@ private:
     void onEnv(const serial_proto::EnvData& e);                    // 串口回调（环境/安全帧）
     void onRawThermal(const uint16_t* raw, int words);             // 串口回调（原始帧 -> 龙芯解算）
     void onEeprom(const uint16_t* ee, int words);                  // 串口回调（EEPROM -> 提取参数）
+    void onPidTele(const serial_proto::PidTele& t);                // 串口回调（PID 调参遥测 0x62）
     void computeAvoid(uint16_t distCm, int16_t baseSpeed,
                       int16_t& speed, int16_t& steering) const;    // 距离 -> 运动
 
@@ -102,6 +123,11 @@ private:
     uint32_t                lastEnvMs_   = 0;
     net::VisionResult       vision_{};     // 上位机回传的视觉识别结果
     uint32_t                lastVisionMs_= 0;
+    // PID 调试：待下发命令队列(网络线程入队, 控制线程 tick 出队发串口) + 遥测缓存
+    std::vector<net::PidCommand>        pidPending_;
+    std::vector<serial_proto::PidTele>  pidTeleQ_;      // 上行遥测队列(上限 kPidTeleQMax)
+    uint32_t                            pidTeleRxCnt_ = 0;
+    static constexpr size_t             kPidTeleQMax  = 128;
     // 接收诊断计数（判断 F4->龙芯 各链路是否真的收到数据）
     uint32_t                telemRxCnt_  = 0;   // 0x5A/7字节 遥测帧
     uint32_t                envRxCnt_    = 0;   // 0x5C 环境帧

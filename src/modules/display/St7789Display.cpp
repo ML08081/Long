@@ -1,4 +1,5 @@
 #include "modules/display/St7789Display.h"
+#include "modules/display/CjkFont16.h"
 #include "modules/logger/Logger.h"
 
 #include <cerrno>
@@ -219,52 +220,183 @@ void St7789Display::flush() {
     }
 }
 
-// ─── 高层：巡检状态页 ──────────────────────────────────────────────────────
-void St7789Display::showStatus(const net::SensorData& s, const std::string& statusLine) {
+// ─── 中文点阵 + UTF-8 混排 ─────────────────────────────────────────────────
+const uint8_t* St7789Display::cjkGlyph(uint32_t cp) {
+    int lo = 0, hi = kCjk16Count - 1;   // 码点升序，二分查找
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        uint32_t c = kCjk16[mid].cp;
+        if (c == cp) return kCjk16[mid].rows;
+        if (c < cp) lo = mid + 1; else hi = mid - 1;
+    }
+    return nullptr;
+}
+
+// ASCII：基础 8(宽)×16(高)，按 scale 放大（水平 scale、垂直 2*scale）
+void St7789Display::drawAscii16(int x, int y, char c, uint16_t fg, uint16_t bg, int scale) {
+    uint8_t ch = static_cast<uint8_t>(c);
+    const uint8_t* g = (ch >= 0x20 && ch < 0x80) ? kFont8x8[ch - 0x20] : kFont8x8[0];
+    for (int row = 0; row < 8; ++row)
+        for (int col = 0; col < 8; ++col) {
+            uint16_t color = (g[row] & (1 << col)) ? fg : bg;
+            fillRect(x + col * scale, y + row * 2 * scale, scale, 2 * scale, color);
+        }
+}
+
+// 中文：16×16 点阵（每行 2 字节，MSB=最左），按 scale 放大
+void St7789Display::drawCjk(int x, int y, uint32_t cp, uint16_t fg, uint16_t bg, int scale) {
+    const uint8_t* g = cjkGlyph(cp);
+    if (!g) { fillRect(x, y, 16 * scale, 16 * scale, bg); return; }   // 未收录 -> 空格
+    for (int row = 0; row < 16; ++row) {
+        uint8_t b0 = g[row * 2], b1 = g[row * 2 + 1];
+        for (int col = 0; col < 16; ++col) {
+            uint8_t byte = (col < 8) ? b0 : b1;
+            int bit = 7 - (col & 7);
+            uint16_t color = (byte & (1 << bit)) ? fg : bg;
+            fillRect(x + col * scale, y + row * scale, scale, scale, color);
+        }
+    }
+}
+
+int St7789Display::drawU8(int x, int y, const std::string& s, uint16_t fg, uint16_t bg, int scale) {
+    size_t i = 0; int cx = x;
+    while (i < s.size()) {
+        uint8_t b = static_cast<uint8_t>(s[i]);
+        uint32_t cp; int adv;
+        if (b < 0x80) {                                   // ASCII
+            cp = b; i += 1;
+            if (cp == '\n') { cx = x; y += 16 * scale; continue; }
+            drawAscii16(cx, y, static_cast<char>(cp), fg, bg, scale);
+            adv = 8 * scale;
+        } else if ((b & 0xE0) == 0xC0 && i + 1 < s.size()) {
+            cp = ((b & 0x1F) << 6) | (static_cast<uint8_t>(s[i+1]) & 0x3F); i += 2;
+            drawCjk(cx, y, cp, fg, bg, scale); adv = 16 * scale;
+        } else if ((b & 0xF0) == 0xE0 && i + 2 < s.size()) {
+            cp = ((b & 0x0F) << 12) | ((static_cast<uint8_t>(s[i+1]) & 0x3F) << 6)
+               | (static_cast<uint8_t>(s[i+2]) & 0x3F); i += 3;
+            drawCjk(cx, y, cp, fg, bg, scale); adv = 16 * scale;
+        } else { i += 1; continue; }                      // 非法字节跳过
+        cx += adv;
+    }
+    return cx;
+}
+
+// ─── 页面公用 ──────────────────────────────────────────────────────────────
+// 标题条：加高到 32px，标题中文放大到 scale 1.5 效果（用 scale=1 但整体更大留白）
+void St7789Display::titleBar(const char* zh) {
+    fillRect(0, 0, cfg_.width, 34, rgb(18,64,96));
+    drawU8(10, 8, zh, rgb(0,225,245), rgb(18,64,96));
+}
+int St7789Display::rowLabel(int y, const char* zh, uint16_t col) {
+    int x = drawU8(10, y, zh, col, rgb(0,0,0));
+    return x + 8;
+}
+
+// ─── 第 1 页：巡检传感数据 ─────────────────────────────────────────────────
+void St7789Display::showSensorPage(const net::SensorData& s) {
     if (spiFd_ < 0) return;
-    const uint16_t BG = rgb(0, 0, 0), WHITE = rgb(230,230,230), CYAN = rgb(0,200,220);
-    const uint16_t GREEN = rgb(0,200,80), YELL = rgb(240,200,0), RED = rgb(230,40,40);
-    static const char* modeName[] = {"MANUAL","AUTO","AVOID","CRUISE"};
-    static const char* riskName[] = {"SAFE","NOTE","WARN","DANGER"};
+    const uint16_t BG=rgb(0,0,0), WHITE=rgb(235,235,235), CYAN=rgb(0,210,230);
+    const uint16_t GREEN=rgb(0,200,80), YELL=rgb(245,205,0), RED=rgb(235,45,45);
+    static const char* modeEn[] = {"MANUAL","AUTO","AVOID","CRUISE"};
+    static const char* riskEn[] = {"SAFE","NOTE","WARN","DANGER"};   // 风险块英文
     static const uint16_t riskCol[] = {GREEN, CYAN, YELL, RED};
 
     clear(BG);
-    // 顶部标题条
-    fillRect(0, 0, cfg_.width, 22, rgb(20,60,90));
-    drawText(6, 4, "PATROL", CYAN, rgb(20,60,90), 2);
+    titleBar("PATROL");        // 状态屏全英文（此页含 SAFE，无中文）
 
-    int y = 30;
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "MODE %s", modeName[s.mode & 0x03]);
-    drawText(6, y, buf, WHITE, BG, 2); y += 22;
-    std::snprintf(buf, sizeof(buf), "DIST %ucm", s.distance_cm);
-    drawText(6, y, buf, WHITE, BG, 2); y += 22;
-    std::snprintf(buf, sizeof(buf), "LASER %ucm", s.laser_cm);
-    drawText(6, y, buf, WHITE, BG, 2); y += 22;
-    std::snprintf(buf, sizeof(buf), "GAS %u", s.gas_ppm);
-    drawText(6, y, buf, WHITE, BG, 2); y += 22;
-    if (s.flags & net::SF_DHT_OK) {
-        std::snprintf(buf, sizeof(buf), "T%d H%u", s.temperature_01c/10, s.humidity_01/10);
-        drawText(6, y, buf, WHITE, BG, 2);
-    }
-    y += 22;
-    std::snprintf(buf, sizeof(buf), "SPD %d/%d", s.speed_L, s.speed_R);
-    drawText(6, y, buf, CYAN, BG, 2); y += 22;
-    std::snprintf(buf, sizeof(buf), "ENC %ld/%ld", (long)s.encoder1, (long)s.encoder2);
-    drawText(6, y, buf, CYAN, BG, 2); y += 22;
-    // 告警行（火焰/气体）
-    if (s.flags & net::SF_FLAME)          drawText(6, y, "FLAME!", RED, BG, 2);
-    else if (s.flags & net::SF_GAS_ALARM) drawText(6, y, "GAS ALARM", RED, BG, 2);
+    // 6 行放大留白：pitch 30，起始 46，铺满到风险块上沿
+    const int pitch = 30;
+    int y = 48; char v[40];
+    { int x = rowLabel(y,"MODE ");  drawU8(x,y, modeEn[s.mode & 0x03], WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"DIST ");
+      if (s.distance_cm) std::snprintf(v,sizeof v,"%u cm", s.distance_cm); else std::snprintf(v,sizeof v,"--");
+      drawU8(x,y, v, WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"LASER");
+      if (s.laser_cm) std::snprintf(v,sizeof v,"%u cm", s.laser_cm); else std::snprintf(v,sizeof v,"--");
+      drawU8(x,y, v, WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"GAS  ");  std::snprintf(v,sizeof v,"%u", s.gas_ppm);
+      drawU8(x,y, v, (s.flags & net::SF_GAS_ALARM) ? RED : WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"TEMP ");
+      if (s.flags & net::SF_DHT_OK) std::snprintf(v,sizeof v,"%d C", s.temperature_01c/10);
+      else std::snprintf(v,sizeof v,"--");
+      drawU8(x,y, v, WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"HUMI ");
+      if (s.flags & net::SF_DHT_OK) std::snprintf(v,sizeof v,"%u %%", s.humidity_01/10);
+      else std::snprintf(v,sizeof v,"--");
+      drawU8(x,y, v, WHITE, BG); } y += pitch;
 
-    // 风险大字块
+    // 底部风险大块（放大：高 92px，英文风险词 scale 4 => 32x64）
     int rl = s.risk_level & 0x03;
-    fillRect(0, cfg_.height - 46, cfg_.width, 46, riskCol[rl]);
-    drawText(6, cfg_.height - 38, riskName[rl], rgb(0,0,0), riskCol[rl], 3);
-    if (s.flags & net::SF_FLAME)     drawText(150, cfg_.height - 38, "FIRE", rgb(0,0,0), riskCol[rl], 2);
-    else if (s.flags & net::SF_GAS_ALARM) drawText(150, cfg_.height - 38, "GAS!", rgb(0,0,0), riskCol[rl], 2);
+    int bh = 92, by = cfg_.height - bh;
+    fillRect(0, by, cfg_.width, bh, riskCol[rl]);
+    drawU8(10, by + 8, "RISK", rgb(0,0,0), riskCol[rl]);   // 状态屏全英文
+    const char* rw = riskEn[rl];
+    int rwWidth = static_cast<int>(std::strlen(rw)) * 8 * 4;   // scale4 ASCII 宽 32/字
+    int rx = (cfg_.width - rwWidth) / 2;  if (rx < 4) rx = 4;
+    drawU8(rx, by + 24, rw, rgb(0,0,0), riskCol[rl], 4);
+    // 告警角标（英文）
+    if (s.flags & net::SF_FLAME)          drawU8(cfg_.width-70, by + 8, "FIRE", RED, riskCol[rl]);
+    else if (s.flags & net::SF_GAS_ALARM) drawU8(cfg_.width-70, by + 8, "GAS!", RED, riskCol[rl]);
 
-    (void)statusLine;
     flush();
+}
+
+// ─── 第 2 页：中转 / 连接状态 ──────────────────────────────────────────────
+void St7789Display::showRelayPage(const RelayInfo& r) {
+    if (spiFd_ < 0) return;
+    const uint16_t BG=rgb(0,0,0), WHITE=rgb(235,235,235), CYAN=rgb(0,210,230);
+    const uint16_t GREEN=rgb(0,210,90), YELL=rgb(245,205,0), RED=rgb(235,45,45);
+
+    clear(BG);
+    titleBar("中转状态");
+
+    const int pitch = 27;
+    int y = 44; char v[48];
+    // 上位机在线状态（醒目）
+    { int x = rowLabel(y,"上位机");
+      if (r.upperOnline) drawU8(x,y,"在线", GREEN, BG);
+      else               drawU8(x,y,"离线", RED,   BG); } y += pitch;
+    // 龙芯本机 IP（中转站自身地址）
+    { int x = rowLabel(y,"本机");
+      drawU8(x,y, r.localIp.empty()? std::string("--") : r.localIp, CYAN, BG); } y += pitch;
+    // 上位机对端地址
+    { int x = rowLabel(y,"地址");
+      drawU8(x,y, r.upperOnline ? r.upperPeer : std::string("--"), WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"时长");
+      if (r.upperOnline) { std::snprintf(v,sizeof v,"%u s", r.upperDurS); drawU8(x,y,v,WHITE,BG); }
+      else drawU8(x,y,"--",WHITE,BG); } y += pitch;
+    // 下位机 F4
+    { int x = rowLabel(y,"下位机");
+      if (r.f4Open && r.telemFresh) drawU8(x,y,"正常", GREEN, BG);
+      else if (r.f4Open)            drawU8(x,y,"无数据", YELL, BG);
+      else                          drawU8(x,y,"未接", RED, BG); } y += pitch;
+    // 链路计数：遥测 / 环境
+    { int x = rowLabel(y,"遥测");  std::snprintf(v,sizeof v,"%u", r.telemCnt);
+      x = drawU8(x,y, v, r.telemFresh?GREEN:WHITE, BG);
+      x = drawU8(x+12,y,"环境", CYAN, BG); std::snprintf(v,sizeof v,"%u", r.envCnt);
+      drawU8(x,y, v, r.envFresh?GREEN:WHITE, BG); } y += pitch;
+    // 热成像
+    { int x = rowLabel(y,"热成像"); std::snprintf(v,sizeof v,"%u 帧", r.thermalCnt);
+      x = drawU8(x,y, v, WHITE, BG);
+      if (r.thermalMaxC10 > -1000) { std::snprintf(v,sizeof v," %dC", r.thermalMaxC10/10);
+        drawU8(x,y, v, r.hotspot?RED:WHITE, BG); } } y += pitch;
+    // 视觉
+    { int x = rowLabel(y,"视觉");
+      if (r.visionOn) { std::snprintf(v,sizeof v,"%s %u%%", r.visionName.c_str(), r.visionConf);
+        drawU8(x,y, v, GREEN, BG); }
+      else drawU8(x,y,"关闭", WHITE, BG); } y += pitch;
+    // 版本 / 运行时间
+    { int x = rowLabel(y,"版本"); drawU8(x,y, std::string("v")+r.version, WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"运行"); std::snprintf(v,sizeof v,"%u s", r.uptimeS);
+      drawU8(x,y, v, WHITE, BG); }
+
+    flush();
+}
+
+// 兼容旧接口
+void St7789Display::showStatus(const net::SensorData& s, const std::string& statusLine) {
+    (void)statusLine;
+    showSensorPage(s);
 }
 
 } // namespace patrol
