@@ -301,42 +301,59 @@ void St7789Display::showSensorPage(const net::SensorData& s) {
     static const char* riskEn[] = {"SAFE","NOTE","WARN","DANGER"};   // 风险块英文
     static const uint16_t riskCol[] = {GREEN, CYAN, YELL, RED};
 
+    const uint16_t GRAY=rgb(90,90,90);
     clear(BG);
     titleBar("PATROL");        // 状态屏全英文（此页含 SAFE，无中文）
+
+    // 链路是否新鲜：fault=1 表示 F4 遥测超时(>1s 无帧)。此时 F4 来的实时量一律显示 "--"，
+    // 绝不把上一帧旧值当实时显示（根治"掉线后数据被冻结"的误导）；标题右侧加 OFFLINE 角标。
+    const bool stale = (s.fault != 0);
+    if (stale) drawU8(cfg_.width - 8 - 7*8, 6, "OFFLINE", RED, CYAN);
 
     // 6 行放大留白：pitch 30，起始 46，铺满到风险块上沿
     const int pitch = 30;
     int y = 48; char v[40];
     { int x = rowLabel(y,"MODE ");  drawU8(x,y, modeEn[s.mode & 0x03], WHITE, BG); } y += pitch;
     { int x = rowLabel(y,"DIST ");
-      if (s.distance_cm) std::snprintf(v,sizeof v,"%u cm", s.distance_cm); else std::snprintf(v,sizeof v,"--");
+      if (!stale && s.distance_cm) std::snprintf(v,sizeof v,"%u cm", s.distance_cm); else std::snprintf(v,sizeof v,"--");
       drawU8(x,y, v, WHITE, BG); } y += pitch;
     { int x = rowLabel(y,"LASER");
-      if (s.laser_cm) std::snprintf(v,sizeof v,"%u cm", s.laser_cm); else std::snprintf(v,sizeof v,"--");
+      if (!stale && s.laser_cm) std::snprintf(v,sizeof v,"%u cm", s.laser_cm); else std::snprintf(v,sizeof v,"--");
       drawU8(x,y, v, WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"GAS  ");  std::snprintf(v,sizeof v,"%u", s.gas_ppm);
-      drawU8(x,y, v, (s.flags & net::SF_GAS_ALARM) ? RED : WHITE, BG); } y += pitch;
+    { int x = rowLabel(y,"GAS  ");
+      if (!stale) std::snprintf(v,sizeof v,"%u", s.gas_ppm); else std::snprintf(v,sizeof v,"--");
+      drawU8(x,y, v, (!stale && (s.flags & net::SF_GAS_ALARM)) ? RED : WHITE, BG); } y += pitch;
     { int x = rowLabel(y,"TEMP ");
-      if (s.flags & net::SF_DHT_OK) std::snprintf(v,sizeof v,"%d C", s.temperature_01c/10);
+      if (!stale && (s.flags & net::SF_DHT_OK)) std::snprintf(v,sizeof v,"%d C", s.temperature_01c/10);
       else std::snprintf(v,sizeof v,"--");
       drawU8(x,y, v, WHITE, BG); } y += pitch;
     { int x = rowLabel(y,"HUMI ");
-      if (s.flags & net::SF_DHT_OK) std::snprintf(v,sizeof v,"%u %%", s.humidity_01/10);
+      if (!stale && (s.flags & net::SF_DHT_OK)) std::snprintf(v,sizeof v,"%u %%", s.humidity_01/10);
       else std::snprintf(v,sizeof v,"--");
       drawU8(x,y, v, WHITE, BG); } y += pitch;
 
-    // 底部风险大块（放大：高 92px，英文风险词 scale 4 => 32x64）
+    // 底部风险大块（放大：高 92px，英文风险词 scale 4 => 32x64）。
+    //   链路超时时不显示可能已过期的风险，改灰底 "NO LINK"，如实反映连接状态。
     int rl = s.risk_level & 0x03;
     int bh = 92, by = cfg_.height - bh;
-    fillRect(0, by, cfg_.width, bh, riskCol[rl]);
-    drawU8(10, by + 8, "RISK", rgb(0,0,0), riskCol[rl]);   // 状态屏全英文
-    const char* rw = riskEn[rl];
-    int rwWidth = static_cast<int>(std::strlen(rw)) * 8 * 4;   // scale4 ASCII 宽 32/字
-    int rx = (cfg_.width - rwWidth) / 2;  if (rx < 4) rx = 4;
-    drawU8(rx, by + 24, rw, rgb(0,0,0), riskCol[rl], 4);
-    // 告警角标（英文）
-    if (s.flags & net::SF_FLAME)          drawU8(cfg_.width-70, by + 8, "FIRE", RED, riskCol[rl]);
-    else if (s.flags & net::SF_GAS_ALARM) drawU8(cfg_.width-70, by + 8, "GAS!", RED, riskCol[rl]);
+    uint16_t blkCol = stale ? GRAY : riskCol[rl];
+    fillRect(0, by, cfg_.width, bh, blkCol);
+    if (stale) {
+        drawU8(10, by + 8, "LINK", rgb(0,0,0), blkCol);
+        const char* rw = "NO LINK";
+        int rwWidth = static_cast<int>(std::strlen(rw)) * 8 * 3;   // scale3 ASCII 宽 24/字
+        int rx = (cfg_.width - rwWidth) / 2;  if (rx < 4) rx = 4;
+        drawU8(rx, by + 28, rw, rgb(0,0,0), blkCol, 3);
+    } else {
+        drawU8(10, by + 8, "RISK", rgb(0,0,0), blkCol);   // 状态屏全英文
+        const char* rw = riskEn[rl];
+        int rwWidth = static_cast<int>(std::strlen(rw)) * 8 * 4;   // scale4 ASCII 宽 32/字
+        int rx = (cfg_.width - rwWidth) / 2;  if (rx < 4) rx = 4;
+        drawU8(rx, by + 24, rw, rgb(0,0,0), blkCol, 4);
+        // 告警角标（英文）
+        if (s.flags & net::SF_FLAME)          drawU8(cfg_.width-70, by + 8, "FIRE", RED, blkCol);
+        else if (s.flags & net::SF_GAS_ALARM) drawU8(cfg_.width-70, by + 8, "GAS!", RED, blkCol);
+    }
 
     flush();
 }

@@ -144,7 +144,21 @@
       "PowerShell(wsl.exe -d Ubuntu bash -lc 'cd /opPJ/PatrolSystem && cmake --build build-host -j4 2>&1 | tail -10')",
       "PowerShell(Get-ChildItem 'F:\\\\projectForXN\\\\NGFXM\\\\LongLook' -Directory | Select-Object -ExpandProperty Name; Write-Output \"=== build 子目录 ===\"; Get-ChildItem 'F:\\\\projectForXN\\\\NGFXM\\\\LongLook\\\\build' -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name; Write-Output \"=== pro network? ===\"; Select-String -Path 'F:\\\\projectForXN\\\\NGFXM\\\\LongLook\\\\LongLook.pro' -Pattern 'QT|network' | ForEach-Object { $_.Line })",
       "PowerShell(wsl.exe -d Ubuntu bash -lc 'cd /opPJ/PatrolSystem && bash scripts/make_package.sh 2>&1 | tail -10')",
-      "PowerShell(wsl.exe -d Ubuntu bash -lc 'ls -la /opPJ/PatrolSystem/patrol_deploy_v1.14.1.tar.gz')"
+      "PowerShell(wsl.exe -d Ubuntu bash -lc 'ls -la /opPJ/PatrolSystem/patrol_deploy_v1.14.1.tar.gz')",
+      "PowerShell($p = \"F:\\\\projectForXN\\\\NGFXM\\\\F4_VGT6first\"; if \\(Test-Path $p\\) { \"EXISTS\"; Get-ChildItem -Path $p -Recurse -Filter \"freertos.c\" -ErrorAction SilentlyContinue | Select-Object FullName } else { \"F4 project path not found: $p\"; Get-ChildItem \"F:\\\\projectForXN\\\\NGFXM\" -ErrorAction SilentlyContinue | Select-Object Name })",
+      "Bash(cd //wsl.localhost/Ubuntu/opPJ/PatrolSystem)",
+      "Bash(ls scripts/)",
+      "Bash(sed -n '1,40p' CMakeLists.txt)",
+      "Bash(sed -n '1,60p' scripts/build_local.sh)",
+      "PowerShell(wsl -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem && rm -rf build-host && cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release >/tmp/cfg.log 2>&1; tail -5 /tmp/cfg.log && echo '===BUILD===' && cmake --build build-host -j\\\\$\\(nproc\\) 2>&1 | tail -40\")",
+      "Bash(sed -n '1,80p' scripts/make_package.sh)",
+      "PowerShell(wsl -d Ubuntu bash -lc \"cd /opPJ/PatrolSystem && bash scripts/make_package.sh 2>&1 | tail -30\")",
+      "Bash(powershell -Command \"\\(Get-Content 'F:/projectForXN/NGFXM/LongLook/mainwindow.cpp' | Measure-Object -Line\\).Lines\")",
+      "PowerShell($qt6 = \"F:\\\\QT\\\\6.11.0\\\\mingw_64\\\\bin\\\\qmake.exe\"; $mingw6 = \"F:\\\\QT\\\\Tools\\\\mingw1310_64\\\\bin\\\\mingw32-make.exe\"; $qt5 = \"F:\\\\QT\\\\5.15.2\\\\mingw81_64\\\\bin\\\\qmake.exe\"; $mingw5 = \"F:\\\\QT\\\\Tools\\\\mingw810_64\\\\bin\\\\mingw32-make.exe\"; \"qt6 qmake: $\\(Test-Path $qt6\\)\"; \"mingw6 make: $\\(Test-Path $mingw6\\)\"; \"qt5 qmake: $\\(Test-Path $qt5\\)\"; \"mingw5 make: $\\(Test-Path $mingw5\\)\")",
+      "PowerShell($exe = \"F:\\\\projectForXN\\\\NGFXM\\\\LongLook\\\\build-opt\\\\release\\\\LongLook.exe\"; if \\(Test-Path $exe\\) { Get-Item $exe | Select-Object Name, @{n='SizeKB';e={[int]\\($_.Length/1KB\\)}}, LastWriteTime | Format-List } else { \"NOT FOUND\" })",
+      "Bash(ls cmake/)",
+      "Bash(ls \"cmake/gcc-arm-none-eabi.cmake\")",
+      "Bash(ls \"/e/gcc/13.3 rel1/bin/arm-none-eabi-gcc.exe\")"
     ]
   }
 }

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 
 namespace patrol {
 
@@ -32,13 +33,9 @@ bool RobotController::init(const std::string& device, int baud,
         LOG_ERROR("RobotController: 串口 %s 打开失败，运动控制不可用", device.c_str());
         return false;
     }
-    serial_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
-    serial_.setEnvCallback([this](const serial_proto::EnvData& e) { onEnv(e); });
-    // 控制口也挂热成像回调，兼容 F4 单串口发送的情形
-    serial_.setThermalCallback([this](const int16_t* t, int c, int r) { onThermal(t, c, r); });
-    serial_.setRawThermalCallback([this](const uint16_t* p, int n) { onRawThermal(p, n); });
-    serial_.setEepromCallback([this](const uint16_t* p, int n) { onEeprom(p, n); });
-    serial_.setPidTeleCallback([this](const serial_proto::PidTele& t) { onPidTele(t); });
+    ctrlDevice_ = device;   // 记住设备/波特率，供遥测断流时重开串口自恢复
+    ctrlBaud_   = baud;
+    registerControlCallbacks();
 
     // 热成像专用串口（双串口方案）：F4 USART1 → 龙芯 thermalDevice。
     // 收 0x5B(F4已解算,旧) 或 0x5D原始帧+0x5E EEPROM(龙芯解算,新)——两种都支持。
@@ -56,11 +53,77 @@ bool RobotController::init(const std::string& device, int baud,
             LOG_ERROR("热成像串口 %s 打开失败（热成像不可用，不影响控制）", thermalDevice.c_str());
         }
     }
+    // 启动热成像解算独立线程：把重解算(ExtractParameters/CalculateTo)从控制线程剥离，
+    // 保证控制线程严格实时（每 tick 快速下发命令帧，始终满足 F4 的 ~510ms 心跳）。
+    if (!solverRun_.exchange(true))
+        solverThread_ = std::thread([this] { solverLoop(); });
+
     LOG_INFO("RobotController 就绪（串口 %s @ %d）", device.c_str(), baud);
     return true;
 }
 
-void RobotController::close() { serial_.close(); thermalSerial_.close(); }
+// 给控制口挂全部回调（init 与串口重开后共用，保证重开后回调不丢）。
+// 控制口也挂热成像回调，兼容 F4 单串口发送(0x5B/0x5D/0x5E)的情形。
+void RobotController::registerControlCallbacks() {
+    serial_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
+    serial_.setEnvCallback([this](const serial_proto::EnvData& e) { onEnv(e); });
+    serial_.setThermalCallback([this](const int16_t* t, int c, int r) { onThermal(t, c, r); });
+    serial_.setRawThermalCallback([this](const uint16_t* p, int n) { onRawThermal(p, n); });
+    serial_.setEepromCallback([this](const uint16_t* p, int n) { onEeprom(p, n); });
+    serial_.setPidTeleCallback([this](const serial_proto::PidTele& t) { onPidTele(t); });
+}
+
+// 遥测长时间断流(端口仍开)时重开控制串口：自愈 fd 卡死/线缆抖动等异常。
+// 只在控制线程(tick)内调用，与 serial_ 的 poll/send 同线程，无并发。
+void RobotController::reopenControlSerial() {
+    LOG_WARN("F4 控制串口 %s 遥测断流 >3s，重开串口自恢复...", ctrlDevice_.c_str());
+    serial_.close();
+    if (serial_.open(ctrlDevice_, ctrlBaud_)) {
+        registerControlCallbacks();
+        LOG_INFO("F4 控制串口已重开: %s @ %d", ctrlDevice_.c_str(), ctrlBaud_);
+    } else {
+        LOG_ERROR("F4 控制串口重开失败: %s（下次周期重试）", ctrlDevice_.c_str());
+    }
+}
+
+RobotController::~RobotController() { close(); }
+
+void RobotController::close() {
+    // 先停解算线程（它独占轮询 thermalSerial_），再关串口，避免 use-after-close。
+    solverRun_.store(false);
+    if (solverThread_.joinable()) solverThread_.join();
+    serial_.close();
+    thermalSerial_.close();
+}
+
+// 热成像解算独立线程：轮询热成像专线 + 消费待解算暂存（EEPROM 提参/原始帧解算）。
+// 与控制线程物理隔离——解算再慢也不会拖延 F4 命令帧下发（不触发 F4 心跳超时掉线）。
+void RobotController::solverLoop() {
+    LOG_INFO("热成像解算线程启动（独立于控制线程，保证 F4 心跳实时）");
+    std::vector<uint16_t> ee, raw;
+    while (solverRun_.load()) {
+        // 热成像专线读取+组帧；回调 onRawThermal/onEeprom 只把数据投入 pending（廉价）。
+        thermalSerial_.poll();
+
+        bool haveEe = false, haveRaw = false;
+        {
+            std::lock_guard<std::mutex> lk(rawMtx_);
+            if (pendingEeNew_)  { ee.swap(pendingEe_);   pendingEeNew_  = false; haveEe  = true; }
+            if (pendingRawNew_) { raw.swap(pendingRaw_); pendingRawNew_ = false; haveRaw = true; }
+        }
+        // 提参在前（solve 需先就绪），再解算最新一帧原始数据。
+        if (haveEe && static_cast<int>(ee.size()) >= ThermalSolver::EE_WORDS)
+            thermalSolver_.setEeprom(ee.data());
+        if (haveRaw && static_cast<int>(raw.size()) >= ThermalSolver::FRAME_WORDS &&
+            thermalSolver_.solve(raw.data(), thermalSolved_))
+            onThermal(thermalSolved_, serial_proto::THERMAL_COLS, serial_proto::THERMAL_ROWS);
+
+        // 无待处理数据时小睡，避免空转占 CPU（热成像仅 ~2Hz，10ms 轮询足够跟手）。
+        if (!haveEe && !haveRaw)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    LOG_INFO("热成像解算线程退出");
+}
 
 float RobotController::ema(float prev, float sample, bool& init, float alpha) {
     if (!init) { init = true; return sample; }
@@ -133,15 +196,18 @@ void RobotController::onThermal(const int16_t* temps, int cols, int rows) {
 
 void RobotController::onEeprom(const uint16_t* ee, int words) {
     if (words < ThermalSolver::EE_WORDS) return;
-    // 提取标定参数（一次性）。解算器就绪后原始帧才能解算。
-    thermalSolver_.setEeprom(ee);
+    // ★不在串口/控制线程内做 ExtractParameters（重）——暂存交解算线程处理，保控制线程实时。
+    std::lock_guard<std::mutex> lk(rawMtx_);
+    pendingEe_.assign(ee, ee + ThermalSolver::EE_WORDS);
+    pendingEeNew_ = true;
 }
 
 void RobotController::onRawThermal(const uint16_t* raw, int words) {
     if (words < ThermalSolver::FRAME_WORDS) return;
-    // 龙芯端解算：原始帧 -> 768 个 int16 温度(0.01°C)。就绪(收到EEPROM)才有效。
-    if (thermalSolver_.solve(raw, thermalSolved_))
-        onThermal(thermalSolved_, serial_proto::THERMAL_COLS, serial_proto::THERMAL_ROWS);
+    // ★不在串口/控制线程内解算（CalculateTo 重）——只暂存最新一帧(新盖旧)交解算线程。
+    std::lock_guard<std::mutex> lk(rawMtx_);
+    pendingRaw_.assign(raw, raw + ThermalSolver::FRAME_WORDS);
+    pendingRawNew_ = true;
 }
 
 bool RobotController::takeThermal(std::vector<int16_t>& out, int& cols, int& rows) {
@@ -170,9 +236,10 @@ void RobotController::computeAvoid(uint16_t d, int16_t baseSpeed,
 }
 
 void RobotController::tick() {
-    // 1) 读取串口遥测（同线程回调 onTelemetry）
+    // 1) 读取串口遥测（同线程回调 onTelemetry/onEnv/onPidTele，均为廉价拷贝）
+    //    ★热成像专线(thermalSerial_)与解算已移到 solverThread_——控制线程不碰热成像，
+    //      任何一 tick 都能快速下发命令帧，始终满足 F4 的 ~510ms 心跳(不触发掉线)。
     serial_.poll();
-    thermalSerial_.poll();   // 热成像专线（0x5B → onThermal）；未打开时内部直接返回
 
     // 精简状态日志(~2s一次)：一行看清 版本/F4→龙芯链路计数/关键传感器/风险/视觉。
     //   RX 计数不涨 => F4 TX→龙芯 RX 没接通或跑旧版本; 涨但上位机空 => 转发/LongLook 问题。
@@ -186,11 +253,24 @@ void RobotController::tick() {
     uint8_t  mode; int16_t mSpd, mStr; bool estop;
     serial_proto::Telemetry t;
     uint16_t avoidDist;   // 用于避障的距离：优先滤波后的稳定值
+    uint32_t lastTelem; bool telValid;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         mode = mode_; mSpd = manualSpeed_; mStr = manualSteer_;
         estop = estop_; t = telem_;
         avoidDist = distInit_ ? static_cast<uint16_t>(std::lround(distFiltCm_)) : t.dist_cm;
+        lastTelem = lastTelemMs_; telValid = telemValid_;
+    }
+
+    // 2.5) 串口自恢复看门狗：端口开着、曾收到过遥测，却连续 >3s 断流→疑似 fd 卡死/
+    //      线缆抖动，重开串口自愈（F4 已把遥测与心跳解耦，正常绝不停发，触发即真异常）。
+    //      限流：最多每 5s 一次，避免真断线时反复重开刷屏。
+    if (serial_.isOpen() && telValid) {
+        uint32_t now = nowMs();
+        if ((now - lastTelem) > 3000 && (now - lastReopenMs_) > 5000) {
+            lastReopenMs_ = now;
+            reopenControlSerial();
+        }
     }
 
     // 3) 计算运动指令

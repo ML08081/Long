@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace patrol {
@@ -32,6 +33,8 @@ struct AvoidParams {
 class RobotController {
 public:
     RobotController() = default;
+
+    ~RobotController();
 
     bool init(const std::string& device, int baud,
               const std::string& thermalDevice = "", int thermalBaud = 115200);
@@ -90,9 +93,12 @@ private:
     void onTelemetry(const serial_proto::Telemetry& t);            // 串口回调（控制线程）
     void onThermal(const int16_t* temps, int cols, int rows);      // 串口回调（F4已解算行帧, 旧路径）
     void onEnv(const serial_proto::EnvData& e);                    // 串口回调（环境/安全帧）
-    void onRawThermal(const uint16_t* raw, int words);             // 串口回调（原始帧 -> 龙芯解算）
-    void onEeprom(const uint16_t* ee, int words);                  // 串口回调（EEPROM -> 提取参数）
+    void onRawThermal(const uint16_t* raw, int words);             // 串口回调（原始帧 -> 暂存，解算线程消费）
+    void onEeprom(const uint16_t* ee, int words);                  // 串口回调（EEPROM -> 暂存，解算线程消费）
+    void solverLoop();                                             // 热成像解算独立线程主体
     void onPidTele(const serial_proto::PidTele& t);                // 串口回调（PID 调参遥测 0x62）
+    void registerControlCallbacks();                               // 给控制口 serial_ 挂全部回调
+    void reopenControlSerial();                                    // 遥测长超时→重开控制串口自恢复
     void computeAvoid(uint16_t distCm, int16_t baseSpeed,
                       int16_t& speed, int16_t& steering) const;    // 距离 -> 运动
 
@@ -109,6 +115,11 @@ private:
     SerialManager serial_;         // 控制/遥测/环境（ttyS1，双向）
     SerialManager thermalSerial_;  // 热成像专线（ttyS2，仅收 0x5B 行帧）
     AvoidParams   av_;
+
+    // 控制串口自恢复：记住设备/波特率，遥测长时间断流时重开 fd 自愈。
+    std::string   ctrlDevice_;
+    int           ctrlBaud_    = 115200;
+    uint32_t      lastReopenMs_ = 0;   // 上次重开串口时刻（限流，最多每 5s 一次）
 
     mutable std::mutex mtx_;
     // ---- 共享状态（mtx_ 保护）----
@@ -148,8 +159,17 @@ private:
     static constexpr float kHotspotThreshC = 50.0f;  // 热点告警阈值 °C
 
     // 热成像解算器（龙芯端解算, 替代 F4 解算）+ 解算输出缓冲
+    // ★解算(ExtractParameters/CalculateTo)只在 solverThread_ 内跑——绝不占用控制线程，
+    //   否则解算耗时会撑破 F4 的 ~510ms 心跳窗口，导致 F4 门控关闭全部上行遥测(“掉线”)。
     ThermalSolver           thermalSolver_;
     int16_t                 thermalSolved_[serial_proto::THERMAL_PIXELS] = {0};
+
+    // 热成像解算独立线程 + 待解算暂存（原始帧/EEPROM 由串口回调投入, 解算线程消费; 新盖旧）
+    std::thread             solverThread_;
+    std::atomic<bool>       solverRun_{false};
+    std::mutex              rawMtx_;
+    std::vector<uint16_t>   pendingRaw_;   bool pendingRawNew_ = false;
+    std::vector<uint16_t>   pendingEe_;    bool pendingEeNew_  = false;
 
     // 热成像帧（单独锁，避免大拷贝阻塞运动共享态）
     mutable std::mutex      thermalMtx_;

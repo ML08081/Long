@@ -101,6 +101,15 @@ void SerialManager::poll() {
     }
     if (rxBuf_.empty()) return;
 
+    // 防御：持续失步/线路噪声可能让半包无限滞留使 rxBuf_ 无界增长。超上限则丢最旧，
+    //   只保留尾部一小段（最大帧长的数倍，足够后续重新对齐），避免内存与延迟膨胀。
+    constexpr size_t kRxBufCap = 8192, kRxKeep = 1024;
+    if (rxBuf_.size() > kRxBufCap) {
+        LOG_WARN("串口 rxBuf 超 %zu 字节（疑似持续失步/噪声），丢弃最旧，保留尾部 %zu",
+                 kRxBufCap, kRxKeep);
+        rxBuf_.erase(rxBuf_.begin(), rxBuf_.end() - static_cast<long>(kRxKeep));
+    }
+
     using namespace serial_proto;
     size_t off = 0;
     const size_t size = rxBuf_.size();
