@@ -5,6 +5,8 @@
 #include "modules/network/FrameProtocol.h"
 #include "modules/serial/SerialManager.h"
 #include "modules/serial/Protocol.h"
+#include "modules/can/CanManager.h"
+#include "modules/can/CanProtocol.h"
 #include "modules/thermal/ThermalSolver.h"
 
 #include <atomic>
@@ -26,20 +28,38 @@ struct AvoidParams {
     int16_t  turnSteer   = 700;   // 避障转向量（+ 向右）
 };
 
-// 机器人底层控制：经串口按 F4 协议下发运动命令 + 接收遥测 + 距离避障。
-// 线程模型：init()/tick() 在控制线程调用（独占 SerialManager）；
+// 传输层选择（实施方案 §3.6/§3.7.6：CAN 与 UART 并存可切换，一键回退）。
+//   type="can" → 走 SocketCAN(can_if)；type="uart" → 走串口(device)。
+//   两者对上层完全同构，RobotController 只换持有的对象。
+struct LinkConfig {
+    std::string type = "uart";              // "can" | "uart"
+    // CAN 传输层
+    std::string canIf = "can0";
+    // UART 传输层（回退，也是 type=uart 时的主链路）
+    std::string device = "/dev/ttyS1";
+    int         baud   = 115200;
+    // 热成像专线（永远走 UART，不上 CAN）
+    std::string thermalDevice = "/dev/ttyS2";
+    int         thermalBaud   = 115200;
+};
+
+// 机器人底层控制：经 CAN 或串口按 F4 协议下发运动命令 + 接收遥测 + 风险判断。
+// 线程模型：init()/tick() 在控制线程调用（独占传输层对象）；
 //           handleCommand()/setManual()/setMode()/fillSensorData() 可由网络线程调用。
-//           共享状态由 mtx_ 保护；串口收发只在控制线程。
+//           共享状态由 mtx_ 保护；传输层收发只在控制线程。
 class RobotController {
 public:
     RobotController() = default;
 
     ~RobotController();
 
+    // 新接口：按 LinkConfig 选择 CAN / UART 传输层。
+    bool init(const LinkConfig& link);
+    // 兼容旧接口（等价于 type=uart）。
     bool init(const std::string& device, int baud,
               const std::string& thermalDevice = "", int thermalBaud = 115200);
     void close();
-    bool isOpen() const { return serial_.isOpen(); }
+    bool isOpen() const { return useCan_ ? can_.isOpen() : serial_.isOpen(); }
 
     // 控制线程周期调用：poll 串口遥测 + 按模式计算并下发命令帧
     void tick();
@@ -97,10 +117,16 @@ private:
     void onEeprom(const uint16_t* ee, int words);                  // 串口回调（EEPROM -> 暂存，解算线程消费）
     void solverLoop();                                             // 热成像解算独立线程主体
     void onPidTele(const serial_proto::PidTele& t);                // 串口回调（PID 调参遥测 0x62）
+    void onPatrolEvent(const can_proto::PatrolEvent& ev);          // CAN 回调（0x481 sub1 巡检事件）
+    void onAvoidProfile(const can_proto::AvoidProfile& pr);        // CAN 回调（0x481 sub2 扫描剖面）
+    void onHeartbeat(const can_proto::Heartbeat& hb);              // CAN 回调（0x701 F4 存活）
     void registerControlCallbacks();                               // 给控制口 serial_ 挂全部回调
+    void registerCanCallbacks();                                   // 给 can_ 挂全部回调（复用同一批消费逻辑）
     void reopenControlSerial();                                    // 遥测长超时→重开控制串口自恢复
+    // ⚠️ 已停用（实施方案 R10）：龙芯不再据距离算转向，运动决策权统一归 F4 本地状态机。
+    //    保留函数仅作历史参考，tick() 不再调用（避免与 F4 快环抢控制）。
     void computeAvoid(uint16_t distCm, int16_t baseSpeed,
-                      int16_t& speed, int16_t& steering) const;    // 距离 -> 运动
+                      int16_t& speed, int16_t& steering) const;    // 距离 -> 运动（deprecated）
 
     // ---- 数据处理（把 F4 原始遥测加工成更稳/更有意义的量再上报）----
     // 距离 EMA 低通：HC-SR04/VL53L0X 单次读数抖动大，滤波后避障与显示更稳。
@@ -112,14 +138,19 @@ private:
     //   这是龙芯"大脑"的核心判断，fillSensorData 与 statusLine 共用。
     uint8_t computeRiskLocked(uint16_t distCm) const;
 
-    SerialManager serial_;         // 控制/遥测/环境（ttyS1，双向）
-    SerialManager thermalSerial_;  // 热成像专线（ttyS2，仅收 0x5B 行帧）
+    SerialManager serial_;         // 控制/遥测/环境（ttyS1，双向；type=uart 时的主链路 / CAN 的回退）
+    CanManager    can_;            // 控制/遥测/环境（can0，双向；type=can 时的主链路）
+    SerialManager thermalSerial_;  // 热成像专线（ttyS2，仅收 0x5B/0x5D/0x5E；永不上 CAN）
     AvoidParams   av_;
 
-    // 控制串口自恢复：记住设备/波特率，遥测长时间断流时重开 fd 自愈。
+    // ---- 传输层选择（CAN / UART，一键回退）----
+    bool          useCan_ = false;      // true=走 can_，false=走 serial_
+    std::string   canIf_;               // CAN 接口名（useCan_ 时用于重建 socket）
+
+    // 传输层自恢复：记住设备/波特率/接口名，上行长时间断流时重开自愈。
     std::string   ctrlDevice_;
     int           ctrlBaud_    = 115200;
-    uint32_t      lastReopenMs_ = 0;   // 上次重开串口时刻（限流，最多每 5s 一次）
+    uint32_t      lastReopenMs_ = 0;   // 上次重开时刻（限流，最多每 5s 一次）
 
     mutable std::mutex mtx_;
     // ---- 共享状态（mtx_ 保护）----
@@ -134,6 +165,23 @@ private:
     uint32_t                lastEnvMs_   = 0;
     net::VisionResult       vision_{};     // 上位机回传的视觉识别结果
     uint32_t                lastVisionMs_= 0;
+    // ---- CAN 事件/心跳（仅 useCan_ 时更新）----
+    can_proto::PatrolEvent  patrolEvt_{};  // 最近一次巡检事件（到点/丢线/受阻…）
+    uint32_t                lastPatrolEvtMs_ = 0;
+    can_proto::AvoidProfile avoidProf_{};  // 最近一次云台扫描剖面
+    uint8_t                 f4HbState_   = 0;  // F4 心跳状态字（0x701）
+    uint32_t                lastHbMs_    = 0;  // 最近一次 F4 心跳时刻
+    uint32_t                patrolEvtRxCnt_ = 0;  // 巡检事件计数（诊断）
+    // ---- 巡检模式联动（2026-07-21）：CAN 只允许控制线程写，故网络线程/回调
+    //      只置 pending，由 tick() 冲刷下发，避免跨线程写 socket。----
+    bool                    patrolCmdPending_ = false;
+    uint8_t                 patrolCmdVal_     = 0;   // can_proto::PatrolCmd
+    bool                    patrolActPending_ = false;
+    uint8_t                 patrolActPoint_   = 0;
+    uint8_t                 patrolActAction_  = 0;   // can_proto::PointAction
+    // CAN 链路健康快照（tick 内在 mtx_ 下从 can_.health() 拷贝；statusLine/linkStatus 无锁跨线程读它，
+    // 避免直接读 can_ 内部计数与控制线程 poll() 的写产生数据竞争）。
+    CanManager::Health      canHealth_{};
     // PID 调试：待下发命令队列(网络线程入队, 控制线程 tick 出队发串口) + 遥测缓存
     std::vector<net::PidCommand>        pidPending_;
     std::vector<serial_proto::PidTele>  pidTeleQ_;      // 上行遥测队列(上限 kPidTeleQMax)

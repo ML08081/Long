@@ -158,7 +158,22 @@
       "PowerShell($exe = \"F:\\\\projectForXN\\\\NGFXM\\\\LongLook\\\\build-opt\\\\release\\\\LongLook.exe\"; if \\(Test-Path $exe\\) { Get-Item $exe | Select-Object Name, @{n='SizeKB';e={[int]\\($_.Length/1KB\\)}}, LastWriteTime | Format-List } else { \"NOT FOUND\" })",
       "Bash(ls cmake/)",
       "Bash(ls \"cmake/gcc-arm-none-eabi.cmake\")",
-      "Bash(ls \"/e/gcc/13.3 rel1/bin/arm-none-eabi-gcc.exe\")"
+      "Bash(ls \"/e/gcc/13.3 rel1/bin/arm-none-eabi-gcc.exe\")",
+      "Bash(ping -c 1 -W 2 192.168.3.172)",
+      "Bash(ping -c 1 -W 2 192.168.127.10)",
+      "Bash(ip -4 addr show)",
+      "Bash(apt-get install *)",
+      "Bash(/e/putty/plink -ssh -pw 1234 root@192.168.3.172 \"echo CONNECTED; uname -a; whoami\")",
+      "Bash(/e/putty/plink -ssh -batch -pw 1234 root@192.168.3.172 \"echo CONNECTED; uname -a\")",
+      "Read(//tmp/**)",
+      "Bash(/e/putty/plink -ssh -batch -hostkey SHA256:K8oyEoddaZ4keNu39exAqMJLDEcncgoQGcRPQ898Bb4 -pw 1234 root@192.168.3.172 'echo CONNECTED; uname -a; cat /etc/os-release | head -4')",
+      "PowerShell(Get-ChildItem \"F:\\\\Qt\\\\6.11.0\" -Directory | Select-Object -ExpandProperty Name; \"---TOOLS MINGW---\"; Get-ChildItem \"F:\\\\Qt\\\\Tools\" -Directory -ErrorAction SilentlyContinue | Where-Object Name -like \"*mingw*\" | Select-Object -ExpandProperty Name)",
+      "PowerShell(New-Item *)",
+      "Bash(python3 *)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Remove-Item *)",
+      "Bash(grep -viE \"wsl:|localhost|NtM|N/ec|hKm|NAT|\\\\\\\\bWSL\\\\\\\\b\")",
+      "Bash(grep -viE \"wsl:|localhost|NtM|N/ec|hKm|NAT|\\\\\\\\bWSL 不\")"
     ]
   }
 }

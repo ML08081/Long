@@ -1,0 +1,37 @@
+# =============================================================================
+#  can0.service -- 开机自动起 CAN 总线（PatrolSystem CAN 链路，实施方案 §3.7.3）
+#
+#  ★ 可选服务：仅当 config.json link.type="can" 时才需要启用。
+#     启用: systemctl enable --now can0.service
+#     确认: ip -details -statistics link show can0
+#
+#  ★★ 实测方案(2026-07-20)推荐用 can1(CAN3, pin74/75)而非 can0(CAN2, pin72/73)——
+#     can0 会抢 ST7789 屏的 DC/RST(gpio72/73)。用 can1 时：把本文件里 3 处 can0 全改成
+#     can1（或复制成 can1.service），config.json 的 link.can_if 也设为 "can1"。
+#     详见 docs/CAN迁移-龙芯端使能指南.md §0.5。
+#
+#  ★ 若 patrol.service 要强依赖 CAN，在其 [Unit] 追加:
+#        After=can0.service
+#        Requires=can0.service
+#     但默认 link.type=uart 时【不要】加 Requires，否则 can0 起不来会拖垮主服务。
+#
+#  restart-ms 100 = bus-off 后内核 100ms 内自动重上线（对应 F4 的 ABOM=ENABLE）。
+#  bitrate 500000 必须与 F4 位时序一致（§3.3）。
+# =============================================================================
+[Unit]
+Description=Bring up can0 (500kbps) for PatrolSystem CAN link
+Before=patrol.service
+# 原生 CAN2 路线下 can0 由内核 CAN 驱动提供；USB-CAN(Plan B) 由 gs_usb 提供。
+Wants=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 先设参数（若接口已 up 会失败，故容错），再拉起
+ExecStartPre=-/sbin/ip link set can0 down
+ExecStart=/sbin/ip link set can0 type can bitrate 500000 restart-ms 100
+ExecStart=/sbin/ip link set can0 up
+ExecStop=/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target

@@ -13,6 +13,12 @@ bool ConfigManager::load(const std::string& path) {
         LOG_WARN("配置文件 %s 无法读取，使用默认值", path.c_str());
         return false;
     }
+    if (content.size() >= 3 &&
+        static_cast<unsigned char>(content[0]) == 0xEF &&
+        static_cast<unsigned char>(content[1]) == 0xBB &&
+        static_cast<unsigned char>(content[2]) == 0xBF) {
+        content.erase(0, 3);
+    }
 
     std::string err;
     json::JsonNode root = json::parse(content, &err);
@@ -43,6 +49,14 @@ bool ConfigManager::load(const std::string& path) {
         serial_.thermalBaud   = static_cast<int>(ser["thermal_baud"].int_or(serial_.thermalBaud));
     }
 
+    const json::JsonNode& lnk = root["link"];
+    if (lnk.is_object()) {
+        link_.type    = lnk["type"].string_or(link_.type);
+        link_.canIf   = lnk["can_if"].string_or(link_.canIf);
+        link_.bitrate = static_cast<int>(lnk["bitrate"].int_or(link_.bitrate));
+        link_.nodeId  = static_cast<int>(lnk["node_id"].int_or(link_.nodeId));
+    }
+
     const json::JsonNode& disp = root["display"];
     if (disp.is_object()) {
         display_.enabled  = disp["enabled"].int_or(display_.enabled ? 1 : 0) != 0;
@@ -56,10 +70,10 @@ bool ConfigManager::load(const std::string& path) {
         display_.rotation = static_cast<int>(disp["rotation"].int_or(display_.rotation));
     }
 
-    LOG_INFO("配置加载完成: cam=%s %dx%d@%dfps | net=%s:%u | serial=%s@%d",
+    LOG_INFO("配置加载完成: cam=%s %dx%d@%dfps | net=%s:%u | link=%s | serial=%s@%d | can=%s",
              camera_.device.c_str(), camera_.width, camera_.height, camera_.fps,
              network_.bind.c_str(), network_.port,
-             serial_.device.c_str(), serial_.baud);
+             link_.type.c_str(), serial_.device.c_str(), serial_.baud, link_.canIf.c_str());
     return true;
 }
 

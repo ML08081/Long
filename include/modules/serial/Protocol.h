@@ -93,6 +93,20 @@ enum Mode : uint8_t {
     MODE_CRUISE   = 3,
 };
 
+// ===== 三种运行模式（2026-07-21）=====================================
+//  沿用上面既有编码值，不破坏协议/上位机兼容，只给出明确语义。
+//  三端(F4 protocol.h / 龙芯 / LongLook)必须一致：
+//    MODE_REMOTE      遥控     —— 完全由上位机下发 speed/steering
+//    MODE_LINE_ONLY   纯循迹   —— F4 本地 TCRT 循线自动巡检
+//    MODE_LINE_VISION 循迹+视觉 —— 循线仍是 F4 本地快环(断网可跑)，
+//                                 龙芯 YOLO/ArUco 作为叠加约束介入
+enum PatrolRunMode : uint8_t {
+    MODE_REMOTE      = MODE_MANUAL,   // 0
+    MODE_LINE_ONLY   = MODE_AUTO,     // 1
+    MODE_LINE_VISION = MODE_CRUISE,   // 3
+
+};
+
 // 遥测解析结果
 struct Telemetry {
     int16_t  speed       = 0;

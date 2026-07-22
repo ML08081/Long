@@ -53,6 +53,7 @@ cp "$ROOT/deploy/scripts/setup_network.sh"         "$PKG/scripts/setup_network.s
 cp "$ROOT/deploy/scripts/health_check.sh"          "$PKG/scripts/health_check.sh"
 cp "$ROOT/deploy/systemd/patrol.service"           "$PKG/systemd/patrol.service"
 cp "$ROOT/deploy/systemd/patrol-network.service"   "$PKG/systemd/patrol-network.service"
+cp "$ROOT/deploy/systemd/can0.service"             "$PKG/systemd/can0.service"
 cp "$ROOT/deploy/network.conf"                     "$PKG/network.conf"
 cp "$ROOT/deploy/wpa_supplicant.conf"              "$PKG/wpa_supplicant.conf"
 cp "$ROOT/deploy/install.sh"                        "$PKG/install.sh"

@@ -99,6 +99,8 @@ int main(int argc, char** argv) {
     cfg.fps      = cfgmgr.camera().fps;
     cfg.port     = cfgmgr.network().port;
     cfg.bindAddr = cfgmgr.network().bind;
+    cfg.linkType  = cfgmgr.link().type;
+    cfg.linkCanIf = cfgmgr.link().canIf;
     cfg.serialDevice = cfgmgr.serial().device;
     cfg.serialBaud   = cfgmgr.serial().baud;
     cfg.serialThermalDevice = cfgmgr.serial().thermalDevice;

@@ -8,13 +8,14 @@ BIN="${PATROL_BIN:-/usr/bin/patrol_system}"
 CONFIG="${PATROL_CONFIG:-/etc/patrol/config.json}"
 CAM_DEV="${PATROL_CAM:-/dev/video0}"
 LOG_DIR="${PATROL_LOG_DIR:-/var/log/patrol}"
+WAIT_CAMERA_SEC="${PATROL_WAIT_CAMERA_SEC:-3}"
 
 mkdir -p "$LOG_DIR"
 
-# 等待摄像头设备出现（最多 30 秒），USB 枚举可能慢于服务启动
-for i in $(seq 1 30); do
+# 等待摄像头设备短暂出现。主程序会自行降级处理无摄像头场景，避免阻塞传感器/屏幕启动。
+for i in $(seq 1 "$WAIT_CAMERA_SEC"); do
     [ -e "$CAM_DEV" ] && { echo "摄像头 $CAM_DEV 已就绪"; break; }
-    echo "等待摄像头 $CAM_DEV ... ($i/30)"
+    echo "等待摄像头 $CAM_DEV ... ($i/$WAIT_CAMERA_SEC)"
     sleep 1
 done
 

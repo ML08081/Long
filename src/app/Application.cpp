@@ -125,11 +125,16 @@ bool Application::healthCheck() {
     LOG_INFO("[健康] 网络监听: %s  (%s:%u)",
              netOk ? "正常" : "异常", cfg_.bindAddr.c_str(), cfg_.port);
 
-    bool serialOk = robot_.isOpen();
-    LOG_INFO("[健康] 下位机串口: %s  (%s @ %d)",
-             serialOk ? "正常" : "未接入", cfg_.serialDevice.c_str(), cfg_.serialBaud);
-    if (!serialOk)
-        LOG_WARN("[健康] F4 串口未打开，运动/避障不可用（仅视频链路可用）");
+    bool linkOk = robot_.isOpen();
+    bool isCan  = (cfg_.linkType == "can");
+    LOG_INFO("[健康] 下位机链路: %s  (%s %s)",
+             linkOk ? "正常" : "未接入",
+             isCan ? "CAN" : "UART",
+             isCan ? cfg_.linkCanIf.c_str() : cfg_.serialDevice.c_str());
+    if (!linkOk)
+        LOG_WARN("[健康] F4 %s 未打开，运动/避障不可用（仅视频链路可用）%s",
+                 isCan ? "CAN" : "串口",
+                 isCan ? "；检查 can0 是否 up、内核 CAN 子系统" : "");
 
     // 串口未接入不算致命（视频链路仍可用），仅摄像头+网络决定 HEALTHY
     bool healthy = camOk && netOk;
@@ -150,9 +155,15 @@ int Application::run() {
         return 1;
     }
 
-    // 打开下位机 F4 串口（失败不致命，仅运动/避障不可用）
-    robot_.init(cfg_.serialDevice, cfg_.serialBaud,
-                cfg_.serialThermalDevice, cfg_.serialThermalBaud);
+    // 打开下位机 F4 传输层（CAN / UART，失败不致命，仅运动/避障不可用）
+    LinkConfig link;
+    link.type   = cfg_.linkType;
+    link.canIf  = cfg_.linkCanIf;
+    link.device = cfg_.serialDevice;
+    link.baud   = cfg_.serialBaud;
+    link.thermalDevice = cfg_.serialThermalDevice;
+    link.thermalBaud   = cfg_.serialThermalBaud;
+    robot_.init(link);
 
     // 打开摄像头：有限次数尝试（不阻塞网络）。失败也继续——上位机仍可连上看传感器/日志，
     // serveClient 每次连接会再懒打开一次，摄像头晚就绪也能自动恢复视频。

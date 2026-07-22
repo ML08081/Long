@@ -50,6 +50,8 @@ set(PATROL_SOURCES
     src/modules/config/ConfigManager.cpp
     # 阶段二：串口 + 运动控制（F4 协议 / 距离避障）
     src/modules/serial/SerialManager.cpp
+    # CAN 传输层（SocketCAN + 类 SDO 客户端 + 链路健康诊断）
+    src/modules/can/CanManager.cpp
     src/business/RobotController.cpp
     # SPI 状态小屏（ST7789，用户空间 spidev + sysfs GPIO）
     src/modules/display/St7789Display.cpp

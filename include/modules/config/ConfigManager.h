@@ -29,6 +29,14 @@ public:
         int         thermalBaud   = 115200;
     };
 
+    // 传输层选择（实施方案 §3.7.8）：type="can" 走 SocketCAN；"uart" 走串口(回退)。
+    struct LinkConf {
+        std::string type    = "uart";     // "can" | "uart"
+        std::string canIf   = "can0";
+        int         bitrate = 500000;      // 记录用；实际由 can0.service 起总线
+        int         nodeId  = 1;           // F4 CANopen Node ID
+    };
+
     // SPI 状态小屏（ST7789，默认关闭）
     struct DisplayConf {
         bool        enabled = false;
@@ -51,6 +59,7 @@ public:
     const CameraConf&  camera()  const { return camera_; }
     const NetworkConf& network() const { return network_; }
     const SerialConf&  serial()  const { return serial_; }
+    const LinkConf&    link()    const { return link_; }
     const DisplayConf& display() const { return display_; }
 
     // 供 CLI 参数覆盖
@@ -62,6 +71,7 @@ private:
     CameraConf  camera_;
     NetworkConf network_;
     SerialConf  serial_;
+    LinkConf    link_;
     DisplayConf display_;
 };
 

@@ -27,10 +27,13 @@ struct AppConfig {
     int         fps      = 30;
     uint16_t    port     = 8080;
     std::string bindAddr = "0.0.0.0";
-    // 下位机 F4 串口
+    // 下位机 F4 传输层选择（CAN / UART 一键切换）
+    std::string linkType  = "uart";        // "can" | "uart"
+    std::string linkCanIf = "can0";
+    // 下位机 F4 串口（UART 主链路 / CAN 回退）
     std::string serialDevice = "/dev/ttyS1";
     int         serialBaud   = 115200;
-    // 热成像专用串口（F4 USART1 → 龙芯此口）
+    // 热成像专用串口（F4 USART1 → 龙芯此口；永不上 CAN）
     std::string serialThermalDevice = "/dev/ttyS2";
     int         serialThermalBaud   = 115200;
     // SPI 状态小屏（ST7789，默认关闭）

@@ -13,12 +13,20 @@
     "port": 8080,
     "peer_note": "上位机 LongLook 作为 TCP 客户端；龙芯板 IP 请在 LongLook 中配置"
   },
+  "link": {
+    "type": "uart",
+    "can_if": "can1",
+    "bitrate": 500000,
+    "node_id": 1,
+    "_note": "F4 传输层选择: type=can 走 SocketCAN(can_if), type=uart 走 serial.device(回退)。★当前默认 uart, 切 CAN 时改 type=can 一键切换, 上层零改动。",
+    "_can_if_note": "★实测(2026-07-20): 板子 can0=CAN2(pin72/73=屏DC/RST), can1=CAN3(pin74/75=屏BL+空脚)。推荐 can1: 屏 DC/RST 不动、只挪 BL 到3V3(gpio_bl=-1)。绝不能 up can0(会抢屏72/73)。详见 docs/CAN迁移-龙芯端使能指南.md §0.5"
+  },
   "serial": {
     "device": "/dev/ttyS1",
     "baud": 115200,
     "thermal_device": "/dev/ttyS2",
     "thermal_baud": 115200,
-    "_note": "device=控制/遥测(双向); thermal_device=热成像专线(F4 USART1→此口, 只收0x5B); 节点待硬件引脚确认"
+    "_note": "device=控制/遥测(双向, link.type=uart 时为主链路/=can 时回退); thermal_device=热成像专线(F4 USART1→此口, 只收0x5B/0x5D/0x5E, 永不上CAN)"
   },
   "display": {
     "enabled": 1,
@@ -30,6 +38,7 @@
     "height": 320,
     "spi_hz": 40000000,
     "rotation": 0,
-    "_note": "GMT020-02 ST7789V 240x320 接 2K0300 IO排针: SCL=PIN21(SPI2_CLK) SDA=PIN27(SPI2_MOSI) CS=PIN23(SPI2_CSn) VCC=PIN2(3.3V,勿接PIN30=5V) GND=PIN1。DC=PIN7=GPIO72(CAN2_TX) RST=PIN9=GPIO73(CAN2_RX) BL=PIN11=GPIO74(CAN3_TX),三者sysfs实测可用。颜色反删驱动0x21(INVON);红蓝反MADCTL加0x08(BGR);方向改rotation"
+    "_note": "GMT020-02 ST7789V 240x320 接 2K0300 IO排针: SCL=PIN21(SPI2_CLK) SDA=PIN27(SPI2_MOSI) CS=PIN23(SPI2_CSn) VCC=PIN2(3.3V,勿接PIN30=5V) GND=PIN1。DC=PIN7=GPIO72 RST=PIN9=GPIO73 BL=PIN11=GPIO74。颜色反删驱动0x21(INVON);红蓝反MADCTL加0x08(BGR);方向改rotation",
+    "_can_conflict": "★实测方案(2026-07-20): CAN 走 can1(CAN3=pin74/75), 屏 DC=72/RST=73 不动。屏 BL 从信号脚 pin74 让给 CAN3_TX → BL 并到屏 VCC 的 3.3V 常亮(切 CAN 时 gpio_bl=-1 驱动跳过背光脚)。★3.3V 只有 IO_PIN2+ADC_PIN1 两脚且被屏占: CAN 收发器 VCC 不必找新脚, 与屏 VCC 并联共享同一 3.3V 即可(电源可一分多)。绝不能 up can0。详见 docs/CAN迁移-龙芯端使能指南.md §0.5"
   }
 }
