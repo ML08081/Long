@@ -60,14 +60,13 @@ public:
     static SendStatus sendTextDroppable(int fd, const std::string& text);
 
     // 非阻塞读取并解析对端发来的下行帧：命令(0x40)→cmds，手动驱动(0x41)→drives，
-    //   视觉(0x42)→visions，PID 调试(0x43)→pids。
+    //   视觉(0x42)→visions。其余类型（含已废弃的 0x43 PID 调试）静默跳过。
     //   buf 为该连接的累积缓冲区（调用方持有，跨调用保留半包）。
     //   返回值：>=0 本次读到的字节数；-1 对端关闭；-2 读错误。
     static int pollCommands(int fd, std::vector<uint8_t>& buf,
                             std::vector<net::Command>& cmds,
                             std::vector<net::DriveCommand>& drives,
-                            std::vector<net::VisionResult>& visions,
-                            std::vector<net::PidCommand>& pids);
+                            std::vector<net::VisionResult>& visions);
 
     static void closeClient(int fd);
 

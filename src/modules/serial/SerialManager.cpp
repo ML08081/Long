@@ -163,7 +163,7 @@ void SerialManager::poll() {
             size_t  need = static_cast<size_t>(4) + static_cast<size_t>(cnt) * 2 + 1;
             if (size - off < need) break;              // 半包
             uint8_t crc = xorChecksum(base, 4 + cnt * 2);
-            if (crc != base[need - 1]) { ++off; continue; }  // 失步
+            if (crc != base[need - 1]) { ++tdiag_.crcDrop; ++off; continue; }  // 失步
 
             const bool isEe = (base[1] == EEPROM_MARKER);
             const int total = isEe ? MLX_EE_WORDS : MLX_FRAME_WORDS;
@@ -174,31 +174,35 @@ void SerialManager::poll() {
                 int w = startWord + i;
                 if (w < total) dst[w] = rdU16(p + i * 2);
             }
-            // 该块的末字覆盖到总长 => 一整份组装完成
-            if (startWord + cnt >= total) {
-                if (isEe) { if (eepromCb_)     eepromCb_(eeAsm_, MLX_EE_WORDS); }
-                else      { if (rawThermalCb_) rawThermalCb_(rawAsm_, MLX_FRAME_WORDS); }
-            }
-            off += need;
-        } else if (base[1] == PID_TELE_MARKER) {
-            // ---- PID 调参遥测帧: [AA][62][LEN=23][payload...][XOR] ----
-            if (size - off < 3) break;                 // 需要 LEN
-            uint8_t len  = base[2];
-            size_t  need = static_cast<size_t>(3) + len + 1;
-            if (size - off < need) break;              // 半包
-            uint8_t crc = xorChecksum(base, 3 + len);
-            if (crc != base[need - 1]) { ++off; continue; }  // 失步
 
-            if (len >= PID_TELE_PAYLOAD && pidTeleCb_) {
-                const uint8_t* p = base + 3;
-                PidTele t;
-                t.seq   = rdU16(p + 0);
-                t.flags = p[2];
-                t.targL = rdI16(p + 3);  t.measL = rdI16(p + 5);  t.outL = rdI16(p + 7);
-                t.targR = rdI16(p + 9);  t.measR = rdI16(p + 11); t.outR = rdI16(p + 13);
-                t.enc1  = rdI32(p + 15);
-                t.enc2  = rdI32(p + 19);
-                pidTeleCb_(t);
+            if (isEe) {
+                ++tdiag_.eeChunks;
+                // EEPROM 832 字正好 26 块整除，末块必然触达总长，沿用原判定即可
+                if (startWord + cnt >= total) {
+                    ++tdiag_.eeFrames;
+                    if (eepromCb_) eepromCb_(eeAsm_, MLX_EE_WORDS);
+                }
+            } else {
+                ++tdiag_.rawChunks;
+                tdiag_.rawLastIdx = idx;
+                if (idx > tdiag_.rawMaxIdx) tdiag_.rawMaxIdx = idx;
+
+                // 新一帧开始：先结算上一帧是否凑齐（没齐就计数，便于定位丢的是哪一块）
+                if (idx == 0) {
+                    if (rawMask_ != 0 && !rawFired_) ++tdiag_.rawIncomplete;
+                    rawMask_ = 0;
+                    rawFired_ = false;
+                }
+                if (idx < 32) rawMask_ |= (1u << idx);
+
+                // 834 字需要 ceil(834/32)=27 块全部到齐才算一整帧（末块只有 2 字）
+                constexpr int kNeedChunks = (MLX_FRAME_WORDS + MLX_CHUNK_WORDS - 1) / MLX_CHUNK_WORDS;
+                constexpr uint32_t kFullMask = (1u << kNeedChunks) - 1u;
+                if (!rawFired_ && (rawMask_ & kFullMask) == kFullMask) {
+                    rawFired_ = true;
+                    ++tdiag_.rawFrames;
+                    if (rawThermalCb_) rawThermalCb_(rawAsm_, MLX_FRAME_WORDS);
+                }
             }
             off += need;
         } else if (base[1] == ENV_MARKER) {

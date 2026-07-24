@@ -16,14 +16,6 @@ uint32_t nowMs() {
     return static_cast<uint32_t>(
         duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
-uint32_t gainQ1000(float v) {
-    if (v < 0.0f) v = 0.0f;
-    if (v > 4000000.0f) v = 4000000.0f;
-    return static_cast<uint32_t>(v * 1000.0f + 0.5f);
-}
-uint16_t clampMaxDelta(uint16_t v) {
-    return static_cast<uint16_t>(std::max<uint16_t>(1, std::min<uint16_t>(2000, v)));
-}
 const char* modeName(uint8_t m) {
     switch (m) {
         case serial_proto::MODE_MANUAL:   return "手动";
@@ -95,12 +87,11 @@ bool RobotController::init(const LinkConfig& link) {
     return true;
 }
 
-// 给 can_ 挂全部回调：遥测/环境/PID 复用与串口完全相同的消费函数（只换"帧从哪来"），
+// 给 can_ 挂全部回调：遥测/环境复用与串口完全相同的消费函数（只换"帧从哪来"），
 // 另加 CAN 专有的巡检事件/扫描剖面/心跳回调。
 void RobotController::registerCanCallbacks() {
     can_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
     can_.setEnvCallback([this](const serial_proto::EnvData& e) { onEnv(e); });
-    can_.setPidTeleCallback([this](const serial_proto::PidTele& t) { onPidTele(t); });
     can_.setPatrolEventCallback([this](const can_proto::PatrolEvent& ev) { onPatrolEvent(ev); });
     can_.setAvoidProfileCallback([this](const can_proto::AvoidProfile& pr) { onAvoidProfile(pr); });
     can_.setHeartbeatCallback([this](const can_proto::Heartbeat& hb) { onHeartbeat(hb); });
@@ -144,7 +135,6 @@ void RobotController::registerControlCallbacks() {
     serial_.setThermalCallback([this](const int16_t* t, int c, int r) { onThermal(t, c, r); });
     serial_.setRawThermalCallback([this](const uint16_t* p, int n) { onRawThermal(p, n); });
     serial_.setEepromCallback([this](const uint16_t* p, int n) { onEeprom(p, n); });
-    serial_.setPidTeleCallback([this](const serial_proto::PidTele& t) { onPidTele(t); });
 }
 
 // 遥测长时间断流(端口仍开)时重开控制串口：自愈 fd 卡死/线缆抖动等异常。
@@ -238,8 +228,12 @@ void RobotController::onTelemetry(const serial_proto::Telemetry& t) {
     if (t.hasDistance) {
         telem_ = t;
         // 距离 EMA 滤波（0 表示无回波/超量程，不参与滤波，避免把有效值拉向 0）
+        // ★ 2026-07-23：α 由 0.4 提到 0.65。原值滞后明显 —— 传感器帧 5Hz，
+        //   α=0.4 需约 500ms 才收敛到阶跃的 63%，小屏与上位机都显得"跟不上手"。
+        //   0.65 把时间常数压到约 200ms，仍能滤掉 HC-SR04 的单次跳变，
+        //   兼顾平滑与跟手（避障用的也是这个值，响应快一点更安全）。
         if (t.dist_cm != 0)
-            distFiltCm_ = ema(distFiltCm_, static_cast<float>(t.dist_cm), distInit_, 0.4f);
+            distFiltCm_ = ema(distFiltCm_, static_cast<float>(t.dist_cm), distInit_, 0.65f);
         updateEncoderSpeed(t.enc1, t.enc2);   // 编码器 -> 真实轮速
     } else {
         telem_.speed    = t.speed;
@@ -257,8 +251,10 @@ void RobotController::onEnv(const serial_proto::EnvData& e) {
     lastEnvMs_ = nowMs();
     ++envRxCnt_;
     // 激光距离 EMA（超量程值不参与滤波）
+    // α 同步提到 0.65（理由见 onTelemetry 里的说明）。F4 侧已加超量程去抖，
+    // 到这里的样本已经是稳定的有效值，不需要再用大惯性去压抖动。
     if (e.vl53_mm != serial_proto::VL53_OUT_OF_RANGE)
-        vl53FiltMm_ = ema(vl53FiltMm_, static_cast<float>(e.vl53_mm), vl53Init_, 0.4f);
+        vl53FiltMm_ = ema(vl53FiltMm_, static_cast<float>(e.vl53_mm), vl53Init_, 0.65f);
 }
 
 void RobotController::onThermal(const int16_t* temps, int cols, int rows) {
@@ -321,7 +317,7 @@ void RobotController::computeAvoid(uint16_t d, int16_t baseSpeed,
 }
 
 void RobotController::tick() {
-    // 1) 读取上行遥测（同线程回调 onTelemetry/onEnv/onPidTele，均为廉价拷贝）
+    // 1) 读取上行遥测（同线程回调 onTelemetry/onEnv，均为廉价拷贝）
     //    ★热成像专线(thermalSerial_)与解算已移到 solverThread_——控制线程不碰热成像，
     //      任何一 tick 都能快速下发命令帧，始终满足 F4 的 ~510ms 心跳(不触发掉线)。
     if (useCan_) can_.poll();
@@ -402,44 +398,8 @@ void RobotController::tick() {
         }
     }
 
-    // 4.5) 冲刷 PID 调试命令队列（网络线程入队 → 本控制线程独占串口写，保证线程安全）
-    {
-        std::vector<net::PidCommand> pending;
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            pending.swap(pidPending_);
-        }
-        for (const auto& pc : pending) {
-            if (useCan_) {
-                if (pc.sub == 1) {
-                    uint32_t abortCode = 0;
-                    uint32_t kp = gainQ1000(pc.kp), ki = gainQ1000(pc.ki), kd = gainQ1000(pc.kd);
-                    uint16_t maxDelta = clampMaxDelta(pc.maxDelta);
-                    uint8_t closed = pc.closedLoop ? 1 : 0;
-                    bool ok = can_.sdoWrite(can_proto::OD_PID, 1, &kp, sizeof(kp), &abortCode) &&
-                              can_.sdoWrite(can_proto::OD_PID, 2, &ki, sizeof(ki), &abortCode) &&
-                              can_.sdoWrite(can_proto::OD_PID, 3, &kd, sizeof(kd), &abortCode) &&
-                              can_.sdoWrite(can_proto::OD_PID, 4, &maxDelta, sizeof(maxDelta), &abortCode) &&
-                              can_.sdoWrite(can_proto::OD_PID, 5, &closed, sizeof(closed), &abortCode);
-                    if (!ok)
-                        LOG_WARN("CAN PID 参数 SDO 写失败 abort=0x%08X", abortCode);
-                    else
-                        LOG_INFO("CAN PID 参数已写入: kp=%.3f ki=%.3f kd=%.3f maxD=%u closed=%d",
-                                 pc.kp, pc.ki, pc.kd, maxDelta, closed ? 1 : 0);
-                } else if (pc.sub == 2) {
-                    can_.sendPidTest(pc.testMode, pc.left, pc.right, pc.durationMs);
-                }
-            } else if (pc.sub == 1) {
-                auto f = serial_proto::buildPidParam(pc.kp, pc.ki, pc.kd,
-                                                     pc.maxDelta, pc.closedLoop);
-                serial_.sendFrame(f.data(), f.size());
-            } else if (pc.sub == 2) {
-                auto f = serial_proto::buildPidTest(pc.testMode, pc.left,
-                                                    pc.right, pc.durationMs);
-                serial_.sendFrame(f.data(), f.size());
-            }
-        }
-    }
+    // 4.5) PID 在线调参链路已于 v1.19.0 整体移除：PID 参数在 F4 端固化定版，
+    //      龙芯不再下发 SDO OD_PID 写、0x301 sub4 测试激励或串口 0x60/0x61 帧。
 
     // 5) 更新状态
     std::lock_guard<std::mutex> lk(mtx_);
@@ -473,33 +433,6 @@ void RobotController::setVision(const net::VisionResult& v) {
     std::lock_guard<std::mutex> lk(mtx_);
     vision_       = v;
     lastVisionMs_ = nowMs();
-}
-
-void RobotController::setPidCommand(const net::PidCommand& pc) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    pidPending_.push_back(pc);
-    if (pc.sub == 1)
-        LOG_INFO("PID 参数入队: kp=%.3f ki=%.3f kd=%.3f maxD=%u closed=%d",
-                 pc.kp, pc.ki, pc.kd, pc.maxDelta, pc.closedLoop ? 1 : 0);
-    else
-        LOG_INFO("PID 测试入队: mode=%u L=%d R=%d dur=%ums",
-                 pc.testMode, pc.left, pc.right, pc.durationMs);
-}
-
-void RobotController::onPidTele(const serial_proto::PidTele& t) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (pidTeleQ_.size() >= kPidTeleQMax)               // 上限保护：丢最老
-        pidTeleQ_.erase(pidTeleQ_.begin());
-    pidTeleQ_.push_back(t);
-    ++pidTeleRxCnt_;
-}
-
-size_t RobotController::takePidTele(std::vector<serial_proto::PidTele>& out) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (pidTeleQ_.empty()) return 0;
-    out.swap(pidTeleQ_);
-    pidTeleQ_.clear();
-    return out.size();
 }
 
 // 龙芯"大脑"综合风险判断（须持 mtx_）：超声波/VL53 距离 / 环境报警 / 热点 / 视觉火焰 取最高。
@@ -542,8 +475,7 @@ std::string RobotController::statusLine() const {
         + (useCan_ ? " [CAN]" : " [UART]")
         + " RX[tele=" + std::to_string(telemRxCnt_)
         + " env="     + std::to_string(envRxCnt_)
-        + " th="      + std::to_string(thermalRxCnt_)
-        + " pid="     + std::to_string(pidTeleRxCnt_) + "]"
+        + " th="      + std::to_string(thermalRxCnt_) + "]"
         + " dist="    + std::to_string(distCm) + "cm"
         + " laser="   + laser
         + " gas="     + std::to_string(env_.valid ? env_.gas_raw : 0)
@@ -558,6 +490,18 @@ std::string RobotController::statusLine() const {
            + " rec="     + std::to_string(h.rec) + "]";
         bool hbFresh = lastHbMs_ && (nowMs() - lastHbMs_) < 3000;
         s += std::string(" hb=") + (hbFresh ? "ok" : "--");
+    }
+    // 热成像专线诊断：整帧计数长期不涨时，靠分块数/最大块号定位是"F4 没发"还是"尾块丢失"
+    {
+        const auto td = thermalSerial_.thermalDiag();
+        s += " THM[rawChk=" + std::to_string(td.rawChunks)
+           + " rawFrm="     + std::to_string(td.rawFrames)
+           + " maxIdx="     + std::to_string(td.rawMaxIdx)
+           + " lastIdx="    + std::to_string(td.rawLastIdx)
+           + " inc="        + std::to_string(td.rawIncomplete)
+           + " eeChk="      + std::to_string(td.eeChunks)
+           + " eeFrm="      + std::to_string(td.eeFrames)
+           + " crcDrop="    + std::to_string(td.crcDrop) + "]";
     }
     if (maxC10 > -1000) s += " hot=" + std::to_string(maxC10 / 10) + "C";
     if (lastVisionMs_ && (nowMs() - lastVisionMs_) < 3000 && vision_.count)
@@ -617,11 +561,7 @@ void RobotController::emergencyStop() {
     estop_ = true;
     manualSpeed_ = 0; manualSteer_ = 0;
     status_ = RobotStatus::EStop;
-    // 急停同时终止 F4 侧可能进行中的 PID 测试激励（0x61 mode=0）
-    net::PidCommand stop;
-    stop.sub = 2; stop.testMode = 0;
-    pidPending_.push_back(stop);
-    LOG_WARN("紧急停止触发！（含 PID 测试终止）");
+    LOG_WARN("紧急停止触发！");
 }
 
 void RobotController::fillSensorData(net::SensorData& s) const {

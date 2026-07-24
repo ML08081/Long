@@ -43,12 +43,12 @@ constexpr uint32_t COBID_HEARTBEAT  = 0x701;  // F4 心跳（存活）
 constexpr uint8_t SUB_PATROL_CMD    = 0x01;   // cmd u8(0停/1启/2暂停/3恢复), flags u8
 constexpr uint8_t SUB_PATROL_ACT    = 0x02;   // point_id u8, action u8(0直行/1左/2右/3结束), resume u8
 constexpr uint8_t SUB_AVOID_POLICY  = 0x03;   // policy u8(0仅停车/1允许绕行), obs_class u8(0未知/1人/2静物)
-constexpr uint8_t SUB_PID_TEST      = 0x04;   // mode u8, left i16, right i16, dur u16
+// sub 0x04 原为 PID 测试激励，v1.19.0 已废弃移除；F4 端亦已屏蔽。该 sub 号保留空缺、不得复用。
 
 // ---- 0x481 TPDO4 —— F4→龙芯，byte0 = sub_id（§3.5.2）---------------------
 constexpr uint8_t SUB_PATROL_EVT    = 0x01;   // event u8, point_seq u8, state u8
 constexpr uint8_t SUB_AVOID_PROFILE = 0x02;   // dist_L u16, dist_C u16, dist_R u16（降精度或拆帧）
-constexpr uint8_t SUB_PIDT          = 0x03;   // PID 调参遥测（多帧，见 §3.5.2；本轮仅占位）
+// sub 0x03 原为 PID 调参遥测，v1.19.0 已废弃移除。该 sub 号保留空缺、不得复用。
 
 // ---- 事件枚举（PATROL_EVT.event，§3.5.2）--------------------------------
 enum PatrolEventType : uint8_t {
@@ -107,7 +107,8 @@ constexpr uint32_t SDO_ABT_TIMEOUT       = 0x05040000;  // SDO 协议超时
 // ---- 对象字典常用 index（§3.5.3，F4 侧实现）----------------------------
 constexpr uint16_t OD_STORE_PARAMS   = 0x1010;  // 写 "save"(0x65766173) → 固化 Flash
 constexpr uint16_t OD_RESTORE_DEFAULT= 0x1011;  // 写 "load"(0x64616F6C) → 恢复出厂
-constexpr uint16_t OD_PID            = 0x2000;  // sub1..5: Kp/Ki/Kd/MaxΔ/ClosedLoop
+// 0x2000 OD_PID(Kp/Ki/Kd/MaxΔ/ClosedLoop) 于 v1.19.0 停用：PID 已在 F4 固化定版，
+//   龙芯不再做 SDO 读写。index 保留空缺、不得复用。
 constexpr uint16_t OD_LINE           = 0x2010;  // sub1..4: STEER_GAIN/PATROL_SPEED/LOST_TIMEOUT/LINE_ON_LEVEL
 constexpr uint16_t OD_AVOID          = 0x2020;  // sub1..6: SLOW_TH/STOP_TH/CLEAR_TH/BACKUP_CM/WALL_BAND/BYPASS_MAX_CM
 constexpr uint16_t OD_CALIB          = 0x2030;  // sub1..2: COUNTS_PER_CM/COUNTS_PER_RAD

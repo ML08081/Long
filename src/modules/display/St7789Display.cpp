@@ -297,40 +297,56 @@ void St7789Display::showSensorPage(const net::SensorData& s) {
     if (spiFd_ < 0) return;
     const uint16_t BG=rgb(0,0,0), WHITE=rgb(235,235,235), CYAN=rgb(0,210,230);
     const uint16_t GREEN=rgb(0,200,80), YELL=rgb(245,205,0), RED=rgb(235,45,45);
-    static const char* modeEn[] = {"MANUAL","AUTO","AVOID","CRUISE"};
-    static const char* riskEn[] = {"SAFE","NOTE","WARN","DANGER"};   // 风险块英文
+    // 模式名中文化，与三端语义一致：0 遥控 / 1 循迹 / 2 避障 / 3 巡检
+    static const char* modeZh[] = {"遥控","循迹","避障","巡检"};
+    // 底部风险块按要求保留英文（RISK 与 SAFE 那一栏）
+    static const char* riskEn[] = {"SAFE","NOTE","WARN","DANGER"};
     static const uint16_t riskCol[] = {GREEN, CYAN, YELL, RED};
 
     const uint16_t GRAY=rgb(90,90,90);
     clear(BG);
-    titleBar("PATROL");        // 状态屏全英文（此页含 SAFE，无中文）
+    titleBar("巡检状态");
 
-    // 链路是否新鲜：fault=1 表示 F4 遥测超时(>1s 无帧)。此时 F4 来的实时量一律显示 "--"，
-    // 绝不把上一帧旧值当实时显示（根治"掉线后数据被冻结"的误导）；标题右侧加 OFFLINE 角标。
+    // 链路是否新鲜：fault=1 表示 F4 遥测超时(>1s 无帧)。此时 F4 来的实时量一律显示 "无"，
+    // 绝不把上一帧旧值当实时显示（根治"掉线后数据被冻结"的误导）；标题右侧加离线角标。
     const bool stale = (s.fault != 0);
-    if (stale) drawU8(cfg_.width - 8 - 7*8, 6, "OFFLINE", RED, CYAN);
+    if (stale) drawU8(cfg_.width - 8 - 2*16, 6, "离线", RED, CYAN);
 
-    // 6 行放大留白：pitch 30，起始 46，铺满到风险块上沿
+    // 6 行放大留白：pitch 30，起始 48，铺满到风险块上沿
     const int pitch = 30;
     int y = 48; char v[40];
-    { int x = rowLabel(y,"MODE ");  drawU8(x,y, modeEn[s.mode & 0x03], WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"DIST ");
-      if (!stale && s.distance_cm) std::snprintf(v,sizeof v,"%u cm", s.distance_cm); else std::snprintf(v,sizeof v,"--");
-      drawU8(x,y, v, WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"LASER");
-      if (!stale && s.laser_cm) std::snprintf(v,sizeof v,"%u cm", s.laser_cm); else std::snprintf(v,sizeof v,"--");
-      drawU8(x,y, v, WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"GAS  ");
-      if (!stale) std::snprintf(v,sizeof v,"%u", s.gas_ppm); else std::snprintf(v,sizeof v,"--");
-      drawU8(x,y, v, (!stale && (s.flags & net::SF_GAS_ALARM)) ? RED : WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"TEMP ");
-      if (!stale && (s.flags & net::SF_DHT_OK)) std::snprintf(v,sizeof v,"%d C", s.temperature_01c/10);
-      else std::snprintf(v,sizeof v,"--");
-      drawU8(x,y, v, WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"HUMI ");
-      if (!stale && (s.flags & net::SF_DHT_OK)) std::snprintf(v,sizeof v,"%u %%", s.humidity_01/10);
-      else std::snprintf(v,sizeof v,"--");
-      drawU8(x,y, v, WHITE, BG); } y += pitch;
+    // 模式行青色高亮，便于一眼确认当前处于哪种运行模式
+    { int x = rowLabel(y,"模式", CYAN);
+      drawU8(x,y, modeZh[s.mode & 0x03], CYAN, BG); } y += pitch;
+    { int x = rowLabel(y,"距离");
+      if (!stale && s.distance_cm) {
+          std::snprintf(v,sizeof v,"%u", s.distance_cm);
+          int xv = drawU8(x,y, v, WHITE, BG);
+          drawU8(xv+4,y, "厘米", WHITE, BG);
+      } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
+    { int x = rowLabel(y,"激光");
+      if (!stale && s.laser_cm) {
+          std::snprintf(v,sizeof v,"%u", s.laser_cm);
+          int xv = drawU8(x,y, v, WHITE, BG);
+          drawU8(xv+4,y, "厘米", WHITE, BG);
+      } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
+    { int x = rowLabel(y,"气体");
+      if (!stale) {
+          std::snprintf(v,sizeof v,"%u", s.gas_ppm);
+          drawU8(x,y, v, (s.flags & net::SF_GAS_ALARM) ? RED : WHITE, BG);
+      } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
+    // 温湿度：DHT 有效位未置位说明 F4 侧传感器无读数，显示"无"而非旧值，避免误判为实时
+    { int x = rowLabel(y,"温度");
+      if (!stale && (s.flags & net::SF_DHT_OK)) {
+          std::snprintf(v,sizeof v,"%d", s.temperature_01c/10);
+          int xv = drawU8(x,y, v, WHITE, BG);
+          drawU8(xv+4,y, "度", WHITE, BG);
+      } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
+    { int x = rowLabel(y,"湿度");
+      if (!stale && (s.flags & net::SF_DHT_OK)) {
+          std::snprintf(v,sizeof v,"%u %%", s.humidity_01/10);
+          drawU8(x,y, v, WHITE, BG);
+      } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
 
     // 底部风险大块（放大：高 92px，英文风险词 scale 4 => 32x64）。
     //   链路超时时不显示可能已过期的风险，改灰底 "NO LINK"，如实反映连接状态。
@@ -339,20 +355,22 @@ void St7789Display::showSensorPage(const net::SensorData& s) {
     uint16_t blkCol = stale ? GRAY : riskCol[rl];
     fillRect(0, by, cfg_.width, bh, blkCol);
     if (stale) {
-        drawU8(10, by + 8, "LINK", rgb(0,0,0), blkCol);
-        const char* rw = "NO LINK";
-        int rwWidth = static_cast<int>(std::strlen(rw)) * 8 * 3;   // scale3 ASCII 宽 24/字
+        // 链路断开不属于 RISK/SAFE 语义，用中文如实反映连接状态
+        drawU8(10, by + 8, "连接", rgb(0,0,0), blkCol);
+        const char* rw = "无连接";
+        int rwWidth = 3 * 16 * 3;                                  // scale3 汉字宽 48/字
         int rx = (cfg_.width - rwWidth) / 2;  if (rx < 4) rx = 4;
-        drawU8(rx, by + 28, rw, rgb(0,0,0), blkCol, 3);
+        drawU8(rx, by + 24, rw, rgb(0,0,0), blkCol, 3);
     } else {
-        drawU8(10, by + 8, "RISK", rgb(0,0,0), blkCol);   // 状态屏全英文
+        drawU8(10, by + 8, "RISK", rgb(0,0,0), blkCol);   // 按要求：本栏保留英文
         const char* rw = riskEn[rl];
         int rwWidth = static_cast<int>(std::strlen(rw)) * 8 * 4;   // scale4 ASCII 宽 32/字
         int rx = (cfg_.width - rwWidth) / 2;  if (rx < 4) rx = 4;
         drawU8(rx, by + 24, rw, rgb(0,0,0), blkCol, 4);
-        // 告警角标（英文）
-        if (s.flags & net::SF_FLAME)          drawU8(cfg_.width-70, by + 8, "FIRE", RED, blkCol);
-        else if (s.flags & net::SF_GAS_ALARM) drawU8(cfg_.width-70, by + 8, "GAS!", RED, blkCol);
+        // 告警角标改中文（避障锁优先级最高：它意味着车已被强制停住，操作者最需要知道）
+        if (s.flags & net::SF_OBS_LOCK)       drawU8(cfg_.width-2*16-6, by + 8, "锁停", RED, blkCol);
+        else if (s.flags & net::SF_FLAME)     drawU8(cfg_.width-2*16-6, by + 8, "火警", RED, blkCol);
+        else if (s.flags & net::SF_GAS_ALARM) drawU8(cfg_.width-2*16-6, by + 8, "气体", RED, blkCol);
     }
 
     flush();
@@ -363,6 +381,7 @@ void St7789Display::showRelayPage(const RelayInfo& r) {
     if (spiFd_ < 0) return;
     const uint16_t BG=rgb(0,0,0), WHITE=rgb(235,235,235), CYAN=rgb(0,210,230);
     const uint16_t GREEN=rgb(0,210,90), YELL=rgb(245,205,0), RED=rgb(235,45,45);
+    const uint16_t GRAY=rgb(90,90,90);
 
     clear(BG);
     titleBar("中转状态");
@@ -380,8 +399,8 @@ void St7789Display::showRelayPage(const RelayInfo& r) {
     { int x = rowLabel(y,"地址");
       drawU8(x,y, r.upperOnline ? r.upperPeer : std::string("--"), WHITE, BG); } y += pitch;
     { int x = rowLabel(y,"时长");
-      if (r.upperOnline) { std::snprintf(v,sizeof v,"%u s", r.upperDurS); drawU8(x,y,v,WHITE,BG); }
-      else drawU8(x,y,"--",WHITE,BG); } y += pitch;
+      if (r.upperOnline) { std::snprintf(v,sizeof v,"%u 秒", r.upperDurS); drawU8(x,y,v,WHITE,BG); }
+      else drawU8(x,y,"无",GRAY,BG); } y += pitch;
     // 下位机 F4
     { int x = rowLabel(y,"下位机");
       if (r.f4Open && r.telemFresh) drawU8(x,y,"正常", GREEN, BG);
@@ -395,7 +414,7 @@ void St7789Display::showRelayPage(const RelayInfo& r) {
     // 热成像
     { int x = rowLabel(y,"热成像"); std::snprintf(v,sizeof v,"%u 帧", r.thermalCnt);
       x = drawU8(x,y, v, WHITE, BG);
-      if (r.thermalMaxC10 > -1000) { std::snprintf(v,sizeof v," %dC", r.thermalMaxC10/10);
+      if (r.thermalMaxC10 > -1000) { std::snprintf(v,sizeof v," %d 度", r.thermalMaxC10/10);
         drawU8(x,y, v, r.hotspot?RED:WHITE, BG); } } y += pitch;
     // 视觉
     { int x = rowLabel(y,"视觉");
@@ -404,7 +423,7 @@ void St7789Display::showRelayPage(const RelayInfo& r) {
       else drawU8(x,y,"关闭", WHITE, BG); } y += pitch;
     // 版本 / 运行时间
     { int x = rowLabel(y,"版本"); drawU8(x,y, std::string("v")+r.version, WHITE, BG); } y += pitch;
-    { int x = rowLabel(y,"运行"); std::snprintf(v,sizeof v,"%u s", r.uptimeS);
+    { int x = rowLabel(y,"运行"); std::snprintf(v,sizeof v,"%u 秒", r.uptimeS);
       drawU8(x,y, v, WHITE, BG); }
 
     flush();

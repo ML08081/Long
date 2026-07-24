@@ -145,19 +145,6 @@ bool CanManager::sendAvoidPolicy(uint8_t policy, uint8_t obsClass) {
     return sendRaw(can_proto::COBID_PATROL_RX, p, 3);
 }
 
-bool CanManager::sendPidTest(uint8_t mode, int16_t left, int16_t right, uint16_t durationMs) {
-    uint8_t p[8];
-    p[0] = can_proto::SUB_PID_TEST;
-    p[1] = mode;
-    p[2] = static_cast<uint8_t>((static_cast<uint16_t>(left)  >> 8) & 0xFF);
-    p[3] = static_cast<uint8_t>( static_cast<uint16_t>(left)        & 0xFF);
-    p[4] = static_cast<uint8_t>((static_cast<uint16_t>(right) >> 8) & 0xFF);
-    p[5] = static_cast<uint8_t>( static_cast<uint16_t>(right)       & 0xFF);
-    p[6] = static_cast<uint8_t>((durationMs >> 8) & 0xFF);
-    p[7] = static_cast<uint8_t>( durationMs       & 0xFF);
-    return sendRaw(can_proto::COBID_PATROL_RX, p, 8);
-}
-
 // ---- 上行帧分发 ---------------------------------------------------------
 void CanManager::dispatch(uint32_t cobId, const uint8_t* d, uint8_t dlc) {
     using namespace serial_proto;
@@ -209,28 +196,8 @@ void CanManager::dispatch(uint32_t cobId, const uint8_t* d, uint8_t dlc) {
                 can_proto::AvoidProfile pr;
                 pr.distL = rdU16(d + 1); pr.distC = rdU16(d + 3); pr.distR = rdU16(d + 5);
                 if (avoidProfCb_) avoidProfCb_(pr);
-            } else if (sub == can_proto::SUB_PIDT && dlc >= 3) {
-                uint8_t part = d[1];
-                if (part < 4) {
-                    if (part == 0) pidMask_ = 0;
-                    size_t off = static_cast<size_t>(part) * 6;
-                    size_t cnt = std::min<size_t>(dlc - 2, serial_proto::PID_TELE_PAYLOAD - off);
-                    std::memcpy(pidAsm_ + off, d + 2, cnt);
-                    pidMask_ |= static_cast<uint8_t>(1u << part);
-                    if (pidMask_ == 0x0F && pidTeleCb_) {
-                        serial_proto::PidTele t;
-                        const uint8_t* p = pidAsm_;
-                        t.seq   = rdU16(p + 0);
-                        t.flags = p[2];
-                        t.targL = rdI16(p + 3);  t.measL = rdI16(p + 5);  t.outL = rdI16(p + 7);
-                        t.targR = rdI16(p + 9);  t.measR = rdI16(p + 11); t.outR = rdI16(p + 13);
-                        t.enc1  = rdI32(p + 15);
-                        t.enc2  = rdI32(p + 19);
-                        pidTeleCb_(t);
-                        pidMask_ = 0;
-                    }
-                }
             }
+            // sub=0x03 (SUB_PIDT) PID 调参遥测已于 v1.19.0 废弃，收到即忽略。
             break;
         }
         case can_proto::COBID_HEARTBEAT: {          // 0x701: state u8

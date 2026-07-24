@@ -77,9 +77,6 @@ private:
     std::mutex            upperMtx_;
     std::string           upperPeer_;         // 对端 IP:port
     uint32_t              startMs_ = 0;        // 进程启动时刻(ms)，算运行时长
-
-    // PID 测试期间静默热成像的截止时刻(ms)：接收线程写、上报线程读。
-    std::atomic<uint32_t> pidHushThermalUntil_{0};
 };
 
 } // namespace patrol

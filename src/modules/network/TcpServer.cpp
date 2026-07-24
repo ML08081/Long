@@ -221,8 +221,7 @@ TcpServer::SendStatus TcpServer::sendTextDroppable(int fd, const std::string& te
 int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
                             std::vector<net::Command>& out,
                             std::vector<net::DriveCommand>& drives,
-                            std::vector<net::VisionResult>& visions,
-                            std::vector<net::PidCommand>& pids) {
+                            std::vector<net::VisionResult>& visions) {
     // 非阻塞读取所有可用数据
     uint8_t tmp[512];
     int total = 0;
@@ -274,32 +273,8 @@ int TcpServer::pollCommands(int fd, std::vector<uint8_t>& buf,
             if (4u + nameLen <= len)
                 v.topClass.assign(reinterpret_cast<const char*>(p + 4), nameLen);
             visions.push_back(v);
-        } else if (type == net::FRAME_PID_CMD && len >= 1) {
-            const uint8_t* p = buf.data() + off + net::LL_HEADER_SIZE;
-            auto rdU16le = [&](int i) { return uint16_t(p[i]) | (uint16_t(p[i+1]) << 8); };
-            auto rdU32le = [&](int i) {
-                return uint32_t(p[i]) | (uint32_t(p[i+1]) << 8) |
-                       (uint32_t(p[i+2]) << 16) | (uint32_t(p[i+3]) << 24);
-            };
-            net::PidCommand pc;
-            pc.sub = p[0];
-            if (pc.sub == 1 && len >= 1 + 15) {
-                // 参数: kp/ki/kd_x1000 u32×3 | max_delta u16 | flags u8
-                pc.kp = rdU32le(1)  / 1000.0f;
-                pc.ki = rdU32le(5)  / 1000.0f;
-                pc.kd = rdU32le(9)  / 1000.0f;
-                pc.maxDelta   = rdU16le(13);
-                pc.closedLoop = (p[15] & 0x01) != 0;
-                pids.push_back(pc);
-            } else if (pc.sub == 2 && len >= 1 + 7) {
-                // 测试: mode u8 | left i16 | right i16 | duration_ms u16
-                pc.testMode   = p[1];
-                pc.left       = static_cast<int16_t>(rdU16le(2));
-                pc.right      = static_cast<int16_t>(rdU16le(4));
-                pc.durationMs = rdU16le(6);
-                pids.push_back(pc);
-            }
         }
+        // 其余帧类型（含已废弃的 0x43 PID 调试命令）在此静默跳过，不中断连接。
         off += need;
     }
     // 丢弃已消费部分

@@ -30,7 +30,6 @@ public:
     using PatrolEventCallback  = std::function<void(const can_proto::PatrolEvent&)>;
     using AvoidProfileCallback = std::function<void(const can_proto::AvoidProfile&)>;
     using HeartbeatCallback    = std::function<void(const can_proto::Heartbeat&)>;
-    using PidTeleCallback      = std::function<void(const serial_proto::PidTele&)>;
 
     CanManager() = default;
     ~CanManager();
@@ -52,7 +51,6 @@ public:
     void setPatrolEventCallback(PatrolEventCallback cb)   { patrolEvtCb_ = std::move(cb); }
     void setAvoidProfileCallback(AvoidProfileCallback cb) { avoidProfCb_ = std::move(cb); }
     void setHeartbeatCallback(HeartbeatCallback cb)       { hbCb_ = std::move(cb); }
-    void setPidTeleCallback(PidTeleCallback cb)           { pidTeleCb_ = std::move(cb); }
 
     // —— 过程数据（无确认，直接 write，非阻塞）——
     // 命令帧(0x201，兼心跳)：speed/steering 会被限幅到 [-1000,1000]。
@@ -63,8 +61,7 @@ public:
     bool sendPatrolAct(uint8_t pointId, uint8_t action, uint8_t resume);
     // 0x301 sub=0x03 避障策略（Tier2 语义）
     bool sendAvoidPolicy(uint8_t policy, uint8_t obsClass);
-    // 0x301 sub=0x04 PID 测试激励（调参时）
-    bool sendPidTest(uint8_t mode, int16_t left, int16_t right, uint16_t durationMs);
+    // 注：0x301 sub=0x04 PID 测试激励已于 v1.19.0 移除，F4 端亦已屏蔽该命令。
 
     // —— 类 SDO 客户端（同步，带超时；只在控制线程、配置期调用，绝不放进 tick 热路径）——
     //   返回 true=成功；失败时 abortCode(可空)带回 CiA 301 abort code(0=超时/本地错)。
@@ -110,15 +107,10 @@ private:
     PatrolEventCallback  patrolEvtCb_;
     AvoidProfileCallback avoidProfCb_;
     HeartbeatCallback    hbCb_;
-    PidTeleCallback      pidTeleCb_;
 
     // TELE_CORE(0x181) 与 TELE_ENC(0x281) 分属两帧，合并成一个 Telemetry 再回调上层。
     serial_proto::Telemetry teleAsm_{};
     bool                    haveEnc_ = false;   // 收到过 0x281（enc 有效）
-
-    // PIDT(0x481/sub3) 分 4 帧传 23B，组齐后复用 serial_proto::PidTele 回调。
-    uint8_t                 pidAsm_[serial_proto::PID_TELE_PAYLOAD] = {0};
-    uint8_t                 pidMask_ = 0;
 };
 
 } // namespace patrol

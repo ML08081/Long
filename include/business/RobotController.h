@@ -70,11 +70,6 @@ public:
     // 上位机对视频流做视觉识别后回传的结果（龙芯"大脑"纳入判断）
     void setVision(const net::VisionResult& v);
 
-    // 上位机 PID 调试命令（FRAME_PID_CMD）：排队，由控制线程 tick() 打包 0x60/0x61 下发 F4。
-    void setPidCommand(const net::PidCommand& pc);
-    // 取走积累的 PID 调参遥测(F4 0x62)，供 serveClient 转发 FRAME_PID_TELE；返回取到条数。
-    size_t takePidTele(std::vector<serial_proto::PidTele>& out);
-
     // 生成一行精简状态（版本/RX链路计数/关键传感器/风险/视觉），
     // 既用于龙芯本地精简日志，也经 FRAME_TEXT 发给上位机的"龙芯日志"栏。
     std::string statusLine() const;
@@ -116,7 +111,6 @@ private:
     void onRawThermal(const uint16_t* raw, int words);             // 串口回调（原始帧 -> 暂存，解算线程消费）
     void onEeprom(const uint16_t* ee, int words);                  // 串口回调（EEPROM -> 暂存，解算线程消费）
     void solverLoop();                                             // 热成像解算独立线程主体
-    void onPidTele(const serial_proto::PidTele& t);                // 串口回调（PID 调参遥测 0x62）
     void onPatrolEvent(const can_proto::PatrolEvent& ev);          // CAN 回调（0x481 sub1 巡检事件）
     void onAvoidProfile(const can_proto::AvoidProfile& pr);        // CAN 回调（0x481 sub2 扫描剖面）
     void onHeartbeat(const can_proto::Heartbeat& hb);              // CAN 回调（0x701 F4 存活）
@@ -182,11 +176,6 @@ private:
     // CAN 链路健康快照（tick 内在 mtx_ 下从 can_.health() 拷贝；statusLine/linkStatus 无锁跨线程读它，
     // 避免直接读 can_ 内部计数与控制线程 poll() 的写产生数据竞争）。
     CanManager::Health      canHealth_{};
-    // PID 调试：待下发命令队列(网络线程入队, 控制线程 tick 出队发串口) + 遥测缓存
-    std::vector<net::PidCommand>        pidPending_;
-    std::vector<serial_proto::PidTele>  pidTeleQ_;      // 上行遥测队列(上限 kPidTeleQMax)
-    uint32_t                            pidTeleRxCnt_ = 0;
-    static constexpr size_t             kPidTeleQMax  = 128;
     // 接收诊断计数（判断 F4->龙芯 各链路是否真的收到数据）
     uint32_t                telemRxCnt_  = 0;   // 0x5A/7字节 遥测帧
     uint32_t                envRxCnt_    = 0;   // 0x5C 环境帧

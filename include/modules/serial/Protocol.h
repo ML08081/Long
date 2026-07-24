@@ -35,21 +35,9 @@ constexpr uint8_t ENV_MARKER      = 0x5C;   // 环境/安全遥测帧第二字�
 constexpr uint8_t RAW_THERM_MARKER= 0x5D;   // 热成像"原始帧"分块(F4只转发, 龙芯解算, 新路径)
 constexpr uint8_t EEPROM_MARKER   = 0x5E;   // MLX90640 EEPROM 标定数据分块(上电发一次)
 
-// ---- PID 在线调试（2026-07-08，与 F4 protocol.h 同源） ----
-constexpr uint8_t PID_PARAM_MARKER = 0x60;  // 下行: PID 参数(kp/ki/kd/max_delta/使能)
-constexpr uint8_t PID_TEST_MARKER  = 0x61;  // 下行: PID 测试激励(开环PWM/闭环阶跃)
-constexpr uint8_t PID_TELE_MARKER  = 0x62;  // 上行: PID 调参遥测(target/meas/out×2轮)
-constexpr uint8_t PID_PARAM_PAYLOAD = 15;
-constexpr uint8_t PID_PARAM_LEN     = 3 + PID_PARAM_PAYLOAD + 1;  // = 19
-constexpr uint8_t PID_TEST_PAYLOAD  = 7;
-constexpr uint8_t PID_TEST_LEN      = 3 + PID_TEST_PAYLOAD + 1;   // = 11
-constexpr uint8_t PID_TELE_PAYLOAD  = 23;
-constexpr uint8_t PID_TELE_LEN      = 3 + PID_TELE_PAYLOAD + 1;   // = 27
-constexpr uint8_t PID_FLAG_CLOSED_LOOP = 0x01;
-// 测试模式（与 F4 PID_TEST_* 一致）
-constexpr uint8_t PID_TEST_OFF       = 0;
-constexpr uint8_t PID_TEST_OPEN_LOOP = 1;   // left/right = 直给 PWM(-1000~1000)
-constexpr uint8_t PID_TEST_CLOSED    = 2;   // left/right = 目标编码器增量(counts/17ms)
+// ---- PID 在线调试链路已于 2026-07-23 整体移除（v1.19.0）----
+//  PID 参数已在 F4 端固化定版(Kp=1.0 Ki=4.0 Kd=0 MaxDelta=1100)，F4 固件亦已屏蔽
+//  0x60/0x61 下行入口与 0x62 上行遥测。龙芯不再定义、解析或转发任何 PID 帧。
 
 // 原始热成像/EEPROM 分块帧: [AA][MARK][idx u8][cnt u8][cnt*2 字节 大端][XOR]
 //   idx=分块序号, cnt=本块字数; 目标数组偏移 = idx*MLX_CHUNK_WORDS。
@@ -71,6 +59,8 @@ constexpr uint8_t ENV_FLAG_DHT_OK   = 0x04;   // 温湿度有效
 constexpr uint8_t ENV_FLAG_VL53_OK  = 0x08;   // 激光测距有效
 constexpr uint8_t ENV_FLAG_OBSTACLE = 0x10;   // 障碍确认（VL53 与超声波双重验证）
 constexpr uint8_t ENV_FLAG_BUZZER   = 0x20;   // 蜂鸣器鸣响中
+constexpr uint8_t ENV_FLAG_VL53_PRESENT = 0x40; // 激光传感器已初始化在位（区分死值/缺失与超量程）
+constexpr uint8_t ENV_FLAG_OBS_LOCK = 0x80;   // ★遥控避障锁生效中（前方过近，F4 已封锁前进）
 
 // 报警等级（环境帧 alarm 字节）
 constexpr uint8_t ALARM_LV_NONE = 0;
@@ -129,61 +119,11 @@ struct EnvData {
     bool     valid   = false;  // 是否已收到过有效环境帧
 };
 
-// PID 调参遥测解析结果（来自 0x62 帧）
-struct PidTele {
-    uint16_t seq   = 0;
-    uint8_t  flags = 0;    // bit0=闭环使能 bit1=测试进行中 bit4-5=测试模式
-    int16_t  targL = 0, measL = 0, outL = 0;
-    int16_t  targR = 0, measR = 0, outR = 0;
-    int32_t  enc1  = 0, enc2  = 0;
-};
-
 // XOR 校验（与 F4 Protocol_CalculateChecksum 一致）
 inline uint8_t xorChecksum(const uint8_t* data, size_t len) {
     uint8_t c = 0;
     for (size_t i = 0; i < len; ++i) c ^= data[i];
     return c;
-}
-
-// 打包 PID 参数帧(0x60，龙芯 -> F4)：增益 ×1000 定点，大端。
-inline std::array<uint8_t, PID_PARAM_LEN>
-buildPidParam(float kp, float ki, float kd, uint16_t maxDelta, bool closedLoop) {
-    auto clampGain = [](float v) -> uint32_t {
-        if (v < 0.0f) v = 0.0f;
-        if (v > 4000000.0f) v = 4000000.0f;
-        return static_cast<uint32_t>(v * 1000.0f + 0.5f);
-    };
-    uint32_t kpq = clampGain(kp), kiq = clampGain(ki), kdq = clampGain(kd);
-    std::array<uint8_t, PID_PARAM_LEN> f{};
-    f[0] = HEADER; f[1] = PID_PARAM_MARKER; f[2] = PID_PARAM_PAYLOAD;
-    auto putU32 = [&](int i, uint32_t v) {
-        f[i]   = static_cast<uint8_t>((v >> 24) & 0xFF);
-        f[i+1] = static_cast<uint8_t>((v >> 16) & 0xFF);
-        f[i+2] = static_cast<uint8_t>((v >>  8) & 0xFF);
-        f[i+3] = static_cast<uint8_t>( v        & 0xFF);
-    };
-    putU32(3,  kpq); putU32(7, kiq); putU32(11, kdq);
-    f[15] = static_cast<uint8_t>((maxDelta >> 8) & 0xFF);
-    f[16] = static_cast<uint8_t>( maxDelta       & 0xFF);
-    f[17] = closedLoop ? PID_FLAG_CLOSED_LOOP : 0;
-    f[18] = xorChecksum(f.data(), 18);
-    return f;
-}
-
-// 打包 PID 测试帧(0x61，龙芯 -> F4)。durationMs=0 时 F4 用默认 3s、上限 10s。
-inline std::array<uint8_t, PID_TEST_LEN>
-buildPidTest(uint8_t mode, int16_t left, int16_t right, uint16_t durationMs) {
-    std::array<uint8_t, PID_TEST_LEN> f{};
-    f[0] = HEADER; f[1] = PID_TEST_MARKER; f[2] = PID_TEST_PAYLOAD;
-    f[3] = mode;
-    f[4] = static_cast<uint8_t>((static_cast<uint16_t>(left)  >> 8) & 0xFF);
-    f[5] = static_cast<uint8_t>( static_cast<uint16_t>(left)        & 0xFF);
-    f[6] = static_cast<uint8_t>((static_cast<uint16_t>(right) >> 8) & 0xFF);
-    f[7] = static_cast<uint8_t>( static_cast<uint16_t>(right)       & 0xFF);
-    f[8] = static_cast<uint8_t>((durationMs >> 8) & 0xFF);
-    f[9] = static_cast<uint8_t>( durationMs       & 0xFF);
-    f[10] = xorChecksum(f.data(), 10);
-    return f;
 }
 
 // 打包命令帧（7 字节）。速度/转向自动限幅到 [-1000,1000]。

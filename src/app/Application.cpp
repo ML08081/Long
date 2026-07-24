@@ -100,11 +100,18 @@ const char* cmdName(uint8_t id) {
 } // namespace
 
 bool Application::interruptibleSleep(int totalMs) {
+    // ★ 2026-07-23：粒度由 100ms 收到 20ms。
+    //   原实现按 100ms 步进且条件是 slept < totalMs，导致 interruptibleSleep(250)
+    //   实际睡 300ms —— 所有基于它的周期（尤其显示线程 4Hz 刷新）都比标称慢一截，
+    //   这是小屏"刷新不够灵敏"的原因之一。20ms 粒度下最大超出仅 19ms。
+    constexpr int kStepMs = 20;
     int slept = 0;
     while (slept < totalMs) {
         if (!running_.load()) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        slept += 100;
+        int step = totalMs - slept;
+        if (step > kStepMs) step = kStepMs;
+        std::this_thread::sleep_for(std::chrono::milliseconds(step));
+        slept += step;
     }
     return running_.load();
 }
@@ -237,8 +244,11 @@ void Application::controlLoop() {
 // 上电即绘制首帧（不依赖上位机连接），独立运行。
 void Application::displayLoop() {
     LOG_INFO("显示线程启动（ST7789 双页轮播 @ ~4Hz 实时刷新, 每页 5s）");
-    const uint32_t kRefreshMs = 250;   // 刷新周期：250ms ≈ 4Hz，够实时又不过载 SPI
-    const uint32_t kDwellMs   = 5000;  // 每页停留 5s
+    // ★ 2026-07-23 提升灵敏度：刷新 250ms->150ms(≈6.7Hz)；
+    //   传感页是现场主要盯的页面，停留时间加长，中转页缩短。
+    const uint32_t kRefreshMs      = 150;   // 刷新周期 ≈ 6.7Hz（fb_ 整帧推送，无闪烁）
+    const uint32_t kDwellSensorMs  = 8000;  // 传感页停留 8s
+    const uint32_t kDwellRelayMs   = 4000;  // 中转页停留 4s
     int page = 0;
     uint32_t pageSinceMs = nowMs();
     while (running_.load()) {
@@ -250,7 +260,8 @@ void Application::displayLoop() {
             display_.showRelayPage(buildRelayInfo());
         }
         if (!interruptibleSleep(kRefreshMs)) break;
-        if (nowMs() - pageSinceMs >= kDwellMs) { pageSinceMs = nowMs(); page ^= 1; }
+        const uint32_t dwell = (page == 0) ? kDwellSensorMs : kDwellRelayMs;
+        if (nowMs() - pageSinceMs >= dwell) { pageSinceMs = nowMs(); page ^= 1; }
     }
     LOG_INFO("显示线程退出");
 }
@@ -331,7 +342,6 @@ void Application::serveClient(int clientFd) {
     // ==== 方案B 第一阶段：四线程解耦（发送/视频采集/上报/接收），单 socket 只由发送线程写 ====
     ClientSession session;
     session.fd = clientFd;
-    pidHushThermalUntil_.store(0);
 
     // 连接建立即发一次状态行（此刻缓冲空，可靠发送）。
     TcpServer::sendText(clientFd, robot_.statusLine());
@@ -390,11 +400,10 @@ void Application::serveClient(int clientFd) {
         });
     }
 
-    // ---- 上报线程：按节拍把 传感器/状态/热成像/PID遥测 投递到发送队列。----
+    // ---- 上报线程：按节拍把 传感器/状态/热成像 投递到发送队列。----
     std::thread reportThread([this, &session] {
         uint32_t lastSensor = 0, lastStatus = 0;
         std::vector<int16_t> thermalBuf;
-        std::vector<serial_proto::PidTele> pidTele;
         while (session.alive.load() && running_.load()) {
             uint32_t t = nowMs();
             if (t - lastSensor >= 200) {          // 5Hz 传感器
@@ -409,10 +418,9 @@ void Application::serveClient(int clientFd) {
                 session.pushSmall(net::FRAME_TEXT,
                                   reinterpret_cast<const uint8_t*>(line.data()), line.size());
             }
-            {                                     // 热成像(有新帧就投；PID 测试期间静默)
+            {                                     // 热成像(有新帧就投)
                 int c = 0, r = 0;
-                bool pidHush = (t < pidHushThermalUntil_.load());
-                if (robot_.takeThermal(thermalBuf, c, r) && c > 0 && r > 0 && !pidHush) {
+                if (robot_.takeThermal(thermalBuf, c, r) && c > 0 && r > 0) {
                     std::vector<uint8_t> pl;
                     pl.reserve(4 + thermalBuf.size() * 2);
                     pl.push_back(static_cast<uint8_t>(c & 0xFF));
@@ -427,41 +435,21 @@ void Application::serveClient(int clientFd) {
                     session.pushSmall(net::FRAME_THERMAL, pl.data(), pl.size());
                 }
             }
-            pidTele.clear();                      // PID 遥测(测试时 50Hz)
-            if (robot_.takePidTele(pidTele)) {
-                for (const auto& pt : pidTele) {
-                    uint8_t pl[23];
-                    auto putI16 = [&](int i, int16_t v) {
-                        pl[i] = static_cast<uint8_t>(v & 0xFF);
-                        pl[i+1] = static_cast<uint8_t>((v >> 8) & 0xFF); };
-                    auto putI32 = [&](int i, int32_t v) {
-                        uint32_t u = static_cast<uint32_t>(v);
-                        pl[i]=u&0xFF; pl[i+1]=(u>>8)&0xFF; pl[i+2]=(u>>16)&0xFF; pl[i+3]=(u>>24)&0xFF; };
-                    pl[0] = static_cast<uint8_t>(pt.seq & 0xFF);
-                    pl[1] = static_cast<uint8_t>((pt.seq >> 8) & 0xFF);
-                    pl[2] = pt.flags;
-                    putI16(3,  pt.targL); putI16(5,  pt.measL); putI16(7,  pt.outL);
-                    putI16(9,  pt.targR); putI16(11, pt.measR); putI16(13, pt.outR);
-                    putI32(15, pt.enc1);  putI32(19, pt.enc2);
-                    session.pushSmall(net::FRAME_PID_TELE, pl, sizeof(pl));
-                }
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     });
 
-    // ---- 接收线程：独立处理下行 命令/驱动/视觉/PID，不被发送拖慢。----
+    // ---- 接收线程：独立处理下行 命令/驱动/视觉，不被发送拖慢。----
     std::thread rxThread([this, &session] {
         std::vector<uint8_t> rxBuf;
         std::vector<net::Command> cmds;
         std::vector<net::DriveCommand> drives;
         std::vector<net::VisionResult> visions;
-        std::vector<net::PidCommand> pidCmds;
         while (session.alive.load() && running_.load()) {
             struct pollfd pfd; pfd.fd = session.fd; pfd.events = POLLIN; pfd.revents = 0;
             if (::poll(&pfd, 1, 100) <= 0) continue;   // 超时/被打断 → 再查退出标志
-            cmds.clear(); drives.clear(); visions.clear(); pidCmds.clear();
-            int rc = TcpServer::pollCommands(session.fd, rxBuf, cmds, drives, visions, pidCmds);
+            cmds.clear(); drives.clear(); visions.clear();
+            int rc = TcpServer::pollCommands(session.fd, rxBuf, cmds, drives, visions);
             if (rc < 0) { session.alive.store(false); break; }   // 对端关闭/错误
             for (const auto& c : cmds) {
                 LOG_INFO("下行命令: %s (0x%02X value=%u)", cmdName(c.cmdId), c.cmdId, c.value);
@@ -469,11 +457,6 @@ void Application::serveClient(int clientFd) {
             }
             for (const auto& d : drives) robot_.driveManual(d.speed, d.steering);
             for (const auto& v : visions) robot_.setVision(v);
-            for (const auto& pc : pidCmds) {
-                if (pc.sub == 2 && pc.testMode != 0)   // PID 测试激励 → 静默热成像腾带宽
-                    pidHushThermalUntil_.store(nowMs() + pc.durationMs + 2000);
-                robot_.setPidCommand(pc);
-            }
         }
     });
 
