@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build build)",
+      "Bash(cmake --build . --target F4_VGT6first)",
+      "Bash(cmake --build .)"
+    ]
+  }
+}
