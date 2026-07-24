@@ -1,0 +1,11 @@
+release/main.o
+release/mainwindow.o
+release/netclient.o
+release/imageview.o
+release/card.o
+release/linktestpage.o
+release/moc_mainwindow.o
+release/moc_netclient.o
+release/moc_imageview.o
+release/moc_card.o
+release/moc_linktestpage.o

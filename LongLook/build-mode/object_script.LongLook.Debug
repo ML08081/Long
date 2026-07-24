@@ -1,0 +1,13 @@
+debug/main.o
+debug/mainwindow.o
+debug/netclient.o
+debug/imageview.o
+debug/card.o
+debug/linktestpage.o
+debug/visionprocessor.o
+debug/moc_mainwindow.o
+debug/moc_netclient.o
+debug/moc_imageview.o
+debug/moc_card.o
+debug/moc_linktestpage.o
+debug/moc_visionprocessor.o
