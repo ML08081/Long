@@ -20,12 +20,24 @@ int xioctl(int fd, unsigned long request, void* arg) {
     return r;
 }
 constexpr int kBufferCount = 4;
+
+void fourccToString(uint32_t fmt, char out[5]) {
+    out[0] = char( fmt        & 0xFF);
+    out[1] = char((fmt >>  8) & 0xFF);
+    out[2] = char((fmt >> 16) & 0xFF);
+    out[3] = char((fmt >> 24) & 0xFF);
+    out[4] = '\0';
+}
 } // namespace
 
 CameraManager::~CameraManager() { close(); }
 
 bool CameraManager::open(const std::string& device, int width, int height, int fps) {
     close();
+    if (width <= 0 || height <= 0 || fps <= 0) {
+        LOG_ERROR("摄像头参数无效: %dx%d@%dfps", width, height, fps);
+        return false;
+    }
     device_ = device;
     fd_ = ::open(device.c_str(), O_RDWR | O_NONBLOCK, 0);
     if (fd_ < 0) {
@@ -39,11 +51,15 @@ bool CameraManager::open(const std::string& device, int width, int height, int f
         LOG_ERROR("VIDIOC_QUERYCAP 失败: %s", std::strerror(errno));
         close(); return false;
     }
-    if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+    uint32_t caps = cap.capabilities;
+    if (cap.capabilities & V4L2_CAP_DEVICE_CAPS)
+        caps = cap.device_caps;
+
+    if (!(caps & V4L2_CAP_VIDEO_CAPTURE)) {
         LOG_ERROR("%s 不支持视频采集", device.c_str());
         close(); return false;
     }
-    if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+    if (!(caps & V4L2_CAP_STREAMING)) {
         LOG_ERROR("%s 不支持流式 I/O", device.c_str());
         close(); return false;
     }
@@ -68,14 +84,14 @@ bool CameraManager::open(const std::string& device, int width, int height, int f
     isMjpeg_ = (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_MJPEG);
 
     if (!isMjpeg_) {
-        char fourcc[5] = {
-            char( fmt.fmt.pix.pixelformat        & 0xFF),
-            char((fmt.fmt.pix.pixelformat >>  8)  & 0xFF),
-            char((fmt.fmt.pix.pixelformat >> 16) & 0xFF),
-            char((fmt.fmt.pix.pixelformat >> 24) & 0xFF), 0 };
-        LOG_WARN("驱动未接受 MJPEG，实际格式 '%s'，上位机可能无法解码", fourcc);
+        char fourcc[5];
+        fourccToString(fmt.fmt.pix.pixelformat, fourcc);
+        LOG_ERROR("驱动未接受 MJPEG，实际格式 '%s'。当前视频协议只发送 JPEG 帧，拒绝继续推送原始格式", fourcc);
+        LOG_ERROR("处理建议: 使用支持 MJPEG 的 UVC 摄像头，或降低分辨率/帧率后重试");
+        close();
+        return false;
     }
-    LOG_INFO("协商分辨率: %dx%d  格式: %s", width_, height_, isMjpeg_ ? "MJPEG" : "非MJPEG");
+    LOG_INFO("协商分辨率: %dx%d  格式: MJPEG", width_, height_);
 
     // 3) 设置帧率（先记录请求值，再尝试写入驱动）
     fps_ = fps;   // 始终保留请求帧率作为基准值

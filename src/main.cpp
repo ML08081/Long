@@ -23,6 +23,8 @@
 #include "utils/TimeUtil.h"
 #include "version.h"
 
+#include <cerrno>
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -78,6 +80,71 @@ std::string compactTime() {
     }
     return out;   // 20260701-093507
 }
+
+bool parseIntRange(const char* text, int minValue, int maxValue,
+                   const char* opt, int* out) {
+    if (!text || *text == '\0') {
+        std::fprintf(stderr, "选项 %s 的参数不能为空\n", opt);
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    long v = std::strtol(text, &end, 10);
+    if (errno == ERANGE || v < static_cast<long>(minValue) ||
+        v > static_cast<long>(maxValue) || end == text || *end != '\0') {
+        std::fprintf(stderr, "选项 %s 的参数无效: %s，应为 %d 到 %d 之间的整数\n",
+                     opt, text, minValue, maxValue);
+        return false;
+    }
+    *out = static_cast<int>(v);
+    return true;
+}
+
+bool ensureNonEmpty(const std::string& value, const char* name) {
+    if (!value.empty()) return true;
+    std::fprintf(stderr, "%s 不能为空\n", name);
+    return false;
+}
+
+bool validateConfig(const AppConfig& cfg) {
+    bool ok = true;
+    ok = ensureNonEmpty(cfg.device, "摄像头设备") && ok;
+    ok = ensureNonEmpty(cfg.bindAddr, "监听地址") && ok;
+    if (cfg.width < 160 || cfg.width > 4096) {
+        std::fprintf(stderr, "分辨率宽度无效: %d，应为 160 到 4096\n", cfg.width);
+        ok = false;
+    }
+    if (cfg.height < 120 || cfg.height > 2160) {
+        std::fprintf(stderr, "分辨率高度无效: %d，应为 120 到 2160\n", cfg.height);
+        ok = false;
+    }
+    if (cfg.fps < 1 || cfg.fps > 120) {
+        std::fprintf(stderr, "帧率无效: %d，应为 1 到 120\n", cfg.fps);
+        ok = false;
+    }
+    if (cfg.port == 0) {
+        std::fprintf(stderr, "TCP 监听端口无效: 0，应为 1 到 65535\n");
+        ok = false;
+    }
+    if (cfg.linkType != "can" && cfg.linkType != "uart") {
+        std::fprintf(stderr, "下位机链路类型无效: %s，应为 can 或 uart\n",
+                     cfg.linkType.c_str());
+        ok = false;
+    }
+    if (cfg.linkType == "can")
+        ok = ensureNonEmpty(cfg.linkCanIf, "CAN 接口") && ok;
+    if (cfg.linkType == "uart")
+        ok = ensureNonEmpty(cfg.serialDevice, "串口设备") && ok;
+    if (cfg.serialBaud <= 0) {
+        std::fprintf(stderr, "串口波特率无效: %d\n", cfg.serialBaud);
+        ok = false;
+    }
+    if (cfg.serialThermalBaud <= 0) {
+        std::fprintf(stderr, "热成像串口波特率无效: %d\n", cfg.serialThermalBaud);
+        ok = false;
+    }
+    return ok;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -86,7 +153,13 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-V" || a == "--version") { printVersion(); return 0; }
-        if ((a == "-c" || a == "--config") && i + 1 < argc) configPath = argv[++i];
+        if (a == "-c" || a == "--config") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "选项 %s 缺少参数\n", a.c_str());
+                return 2;
+            }
+            configPath = argv[++i];
+        }
     }
 
     ConfigManager cfgmgr;
@@ -121,12 +194,28 @@ int main(int argc, char** argv) {
     std::string logDir, logFile;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "-c" || a == "--config") { ++i; }
+        if (a == "-c" || a == "--config") { needValue(argc, argv, i, a.c_str()); }
         else if (a == "-d" || a == "--device") cfg.device = needValue(argc, argv, i, a.c_str());
-        else if (a == "-W" || a == "--width")  cfg.width  = std::atoi(needValue(argc, argv, i, a.c_str()));
-        else if (a == "-H" || a == "--height") cfg.height = std::atoi(needValue(argc, argv, i, a.c_str()));
-        else if (a == "-f" || a == "--fps")    cfg.fps    = std::atoi(needValue(argc, argv, i, a.c_str()));
-        else if (a == "-p" || a == "--port")   cfg.port   = static_cast<uint16_t>(std::atoi(needValue(argc, argv, i, a.c_str())));
+        else if (a == "-W" || a == "--width") {
+            int v = 0;
+            if (!parseIntRange(needValue(argc, argv, i, a.c_str()), 160, 4096, a.c_str(), &v)) return 2;
+            cfg.width = v;
+        }
+        else if (a == "-H" || a == "--height") {
+            int v = 0;
+            if (!parseIntRange(needValue(argc, argv, i, a.c_str()), 120, 2160, a.c_str(), &v)) return 2;
+            cfg.height = v;
+        }
+        else if (a == "-f" || a == "--fps") {
+            int v = 0;
+            if (!parseIntRange(needValue(argc, argv, i, a.c_str()), 1, 120, a.c_str(), &v)) return 2;
+            cfg.fps = v;
+        }
+        else if (a == "-p" || a == "--port") {
+            int v = 0;
+            if (!parseIntRange(needValue(argc, argv, i, a.c_str()), 1, 65535, a.c_str(), &v)) return 2;
+            cfg.port = static_cast<uint16_t>(v);
+        }
         else if (a == "-b" || a == "--bind")   cfg.bindAddr = needValue(argc, argv, i, a.c_str());
         else if (a == "--log-dir")             logDir  = needValue(argc, argv, i, a.c_str());
         else if (a == "--log-file")            logFile = needValue(argc, argv, i, a.c_str());
@@ -139,6 +228,8 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+
+    if (!validateConfig(cfg)) return 2;
 
     Logger::setLevel(verbose ? LogLevel::Debug : LogLevel::Info);
 

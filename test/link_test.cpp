@@ -10,9 +10,7 @@
 //  配套 test/frame_parser_check.py 复刻了 LongLook 的解析逻辑做收端校验。
 //
 //  单独编译（WSL）：
-//     g++ -std=c++11 -Iinclude test/link_test.cpp \
-//         src/modules/network/TcpServer.cpp src/modules/logger/Logger.cpp \
-//         -lpthread -o /tmp/link_test
+//     g++ -std=c++11 -Iinclude test/link_test.cpp src/modules/network/TcpServer.cpp src/modules/logger/Logger.cpp -lpthread -o /tmp/link_test
 // =============================================================================
 #include "modules/network/TcpServer.h"
 #include "modules/network/FrameProtocol.h"
@@ -36,7 +34,7 @@ int main(int argc, char** argv) {
     if (fd < 0) { LOG_ERROR("等待客户端超时/出错"); return 1; }
 
     // 1) 文本帧
-    TcpServer::sendText(fd, "✅ link_test 就绪");
+    TcpServer::sendText(fd, "link_test 就绪");
 
     // 2) 传感器帧（40 字节）
     net::SensorData s;

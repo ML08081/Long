@@ -103,7 +103,7 @@ def main():
 
     print(">>> 统计:", stats)
     ok = stats["bad"] == 0 and (stats["video"] > 0 or stats["text"] > 0)
-    print(">>> 结果:", "通过 ✅" if ok else "失败 ❌")
+    print(">>> 结果:", "通过" if ok else "失败")
     return 0 if ok else 1
 
 

@@ -1,189 +1,278 @@
-# PatrolSystem — 龙芯 2K0300 智能巡检系统（下位机）
+# PatrolSystem 龙芯 2K0300 智能巡检系统下位机
 
-龙芯 2K0300 端 C++ 程序。**当前阶段只实现「摄像头 → TCP → 上位机 LongLook」的视频链路测试**，
-用于打通并验证下位机与上位机之间的网络视频链路；其余业务模块（传感器、串口、运动控制等）暂为占位，后续补充。
+PatrolSystem 是运行在龙芯 2K0300 板端的下位机程序，负责采集摄像头视频、监听上位机连接、转发遥测数据，并通过 UART 或 SocketCAN 与 STM32F407 控制板通信。
 
+当前仓库已具备视频链路、网络帧协议、基础配置、下位机链路抽象、SPI 状态屏、热成像解算接口等框架能力。完整巡检业务仍需继续补充任务调度、路线执行、硬件闭环控制和实机验收数据。
+
+## 一、当前能力边界
+
+### 已接入能力
+
+1. 龙芯端作为 TCP 服务端，默认监听 `0.0.0.0:8080`。
+2. LongLook 上位机作为 TCP 客户端连接龙芯板。
+3. V4L2 采集 USB 摄像头 MJPEG 帧，并按协议发送给上位机。
+4. 周期发送传感器遥测帧，当前由 STM32 链路或占位数据填充。
+5. 支持 UART 与 SocketCAN 两种下位机通信方式，运行时由 `config/config.json` 配置选择。
+6. 支持 SPI ST7789 状态屏显示，默认由配置决定是否启用。
+7. 支持 UDP 发现广播，便于上位机发现板端地址。
+8. 支持热成像解算接口，具体数据链路仍依赖实机接线与 STM32 数据输入。
+
+### 尚需补充能力
+
+1. 巡检路线与任务状态机尚未形成完整闭环。
+2. `config/patrol.json` 中的巡检点配置尚未作为主任务入口执行。
+3. 上位机下行命令需要继续完善到真实硬件动作，包括风扇、蜂鸣器、继电器、LED、模式切换和急停。
+4. 非 MJPEG 摄像头暂不做软编码。当前程序只接受 MJPEG，避免将 YUYV 等原始帧误当作 JPEG 发给上位机。
+5. 需要补充实机验收记录，包括摄像头、网络、CAN/UART、状态屏、热成像和开机自启。
+
+## 二、总体链路
+
+```text
+USB Camera(MJPEG)
+      |
+      v
+DragonBoard 2K0300 / PatrolSystem
+      |        \
+      |         \ UART or SocketCAN
+      |          \
+      v           v
+LongLook PC      STM32F407 Control Board
+TCP Client       Sensors / Motion / Actuators
 ```
-┌──────────────────────────┐    WiFi / TCP     ┌──────────────────────────────┐
-│ 龙芯 2K0300  (本程序)     │  ───────────────▶ │  LongLook 监控前端 (PC)       │
-│ TCP 服务端 :8080          │   0x10 视频帧      │  TCP 客户端                   │
-│ V4L2 采集 USB 摄像头(MJPEG)│   0x30 文本/0x01   │  默认连 192.168.1.100:8080    │
-└──────────────────────────┘ ◀───────────────  └──────────────────────────────┘
-                                0x40 下行命令
+
+网络帧采用流式长度前缀协议：
+
+```text
++------+-------+------------+----------------+
+| 0xA5 | TYPE  | LEN(4B LE) | PAYLOAD        |
++------+-------+------------+----------------+
 ```
 
-- **角色**：龙芯端是 **TCP 服务端**，上位机 LongLook 是 **TCP 客户端**（与 `LongLook/protocol.h` 约定一致）。
-- **视频来源**：V4L2 直接采集 USB 摄像头的 **MJPEG** 帧，每帧本身就是一张 JPEG，**零编码**直接发送 → 不依赖 OpenCV/libjpeg，交叉编译到 LoongArch 最省事。
-- **依赖**：仅 Linux/POSIX + V4L2（内核头）+ pthread，无第三方库。
+主要帧类型：
 
----
+- `0x01`：传感器遥测，龙芯到上位机。
+- `0x10`：视频帧，龙芯到上位机，负载必须是 JPEG 字节流。
+- `0x20`：热成像帧，龙芯到上位机。
+- `0x30`：文本或日志，龙芯到上位机。
+- `0x40`：控制命令，上位机到龙芯。
+- `0x41`：手动驱动命令，上位机到龙芯。
+- `0x42`：视觉识别结果，上位机到龙芯。
 
-## 一、目录结构
+协议常量需要与 `LongLook/protocol.h` 保持一致。修改任一端协议时，必须同步另一端并运行链路测试。
 
-```
+## 三、目录结构
+
+```text
 PatrolSystem/
-├── CMakeLists.txt              # 顶层构建
-├── toolchain.cmake            # 龙芯 LoongArch64 交叉编译工具链
-├── scripts/build.sh           # 一键构建脚本
-├── config/config.json         # 运行参数参考（当前以命令行参数为准）
+├── CMakeLists.txt
+├── toolchain.cmake
+├── config/
+│   ├── config.json          # 运行配置
+│   └── patrol.json          # 巡检路线示例，待接入主任务逻辑
+├── deploy/                  # 板端安装、systemd、网络配置
 ├── include/
-│   ├── app/Application.h
-│   └── modules/
-│       ├── camera/CameraManager.h     # V4L2 采集
-│       ├── network/FrameProtocol.h    # 与 LongLook 对接的帧协议 v2
-│       ├── network/TcpServer.h        # TCP 服务端
-│       └── logger/Logger.h
-└── src/
-    ├── main.cpp                       # 入口：参数解析 + 信号处理
-    ├── app/Application.cpp            # 主流程：采集→推流
-    └── modules/{camera,network,logger}/*.cpp
+├── src/
+│   ├── app/                 # 主流程
+│   ├── business/            # 下位机控制与业务封装
+│   └── modules/             # 摄像头、网络、配置、串口、CAN、显示等模块
+├── test/                    # 链路协议自测
+├── third_party/             # MLX90640 解算依赖
+└── kernel-modules/          # UVC/V4L2 内核模块补充资料与脚本
 ```
 
-> 其余 `include/business`、`include/core`、`src/business`、`src/core` 等为后续功能占位，当前不参与编译
-> （见 `CMakeLists.txt` 的 `PATROL_SOURCES` 列表）。
+## 四、构建要求
 
----
-
-## 二、网络帧协议 (v2)
-
-与上位机 `LongLook/protocol.h` 完全一致。流式，长度前缀，无 CRC（TCP 已保证可靠）：
-
-```
-┌──────┬──────┬────────────┬────────────────┐
-│ 0xA5 │ TYPE │ LEN(4B LE) │ PAYLOAD(LEN B) │
-└──────┴──────┴────────────┴────────────────┘
-```
-
-| TYPE | 方向 | 含义 | 本程序 |
-|------|------|------|--------|
-| `0x01` | 龙芯→前端 | 传感器遥测(40B 小端) | 每秒发一帧占位数据 |
-| `0x10` | 龙芯→前端 | 视频帧 (JPEG) | **主要内容**，按摄像头帧率推送 |
-| `0x30` | 龙芯→前端 | 文本/日志 (UTF-8) | 连接成功时发一条就绪提示 |
-| `0x40` | 前端→龙芯 | 控制命令 `[cmdId][value]` | 仅记录日志（功能留空） |
-
----
-
-## 三、在 WSL 下构建
-
-### 1. 安装工具链
+### WSL 或 Linux 本地构建
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake
-# 交叉编译龙芯需要 LoongArch64 工具链（按你的实际工具链安装）：
-# sudo apt install -y gcc-loongarch64-linux-gnu g++-loongarch64-linux-gnu
-```
+sudo apt install -y build-essential cmake linux-libc-dev
 
-> Linux 的 V4L2 头文件（`linux/videodev2.h`）随内核头文件提供，Ubuntu/Debian 一般已自带；
-> 若缺失：`sudo apt install linux-libc-dev`。
-
-### 2. 本地编译（x86_64，用于联调逻辑）
-
-```bash
 ./scripts/build.sh
-# 产物: build/bin/patrol_system
 ```
 
-### 3. 交叉编译到龙芯 2K0300 (LoongArch64)
+产物位置：
+
+```text
+build/bin/patrol_system
+```
+
+### 龙芯 2K0300 交叉编译
+
+项目面向龙芯旧世界系统时，需要使用匹配的 LoongArch64 old-world GCC 8.3 工具链。
+
+推荐命令：
 
 ```bash
 ./scripts/build.sh loong
-# 或指定工具链前缀：
-./scripts/build.sh loong loongarch64-linux-gnu-
-# 产物: build-loong/bin/patrol_system
 ```
 
-> 若你的板子用的是旧 MIPS 工具链，把前缀换成 `mips64el-linux-gnuabi64-` 即可，
-> 或编辑 `toolchain.cmake`。
-
-手动等价命令：
+或者显式指定工具链 `bin` 目录：
 
 ```bash
-mkdir -p build-loong && cd build-loong
-cmake -DCMAKE_TOOLCHAIN_FILE=../toolchain.cmake ..
-make -j$(nproc)
+./scripts/build.sh loong /path/to/loongson-gnu-toolchain-8.3/bin
 ```
 
----
+产物位置：
 
-## 四、运行
+```text
+build-loong/bin/patrol_system
+```
+
+如果误用 new-world 工具链，程序可能无法在目标板系统上运行。交叉编译完成后应使用 `file` 检查目标架构和动态解释器。
+
+## 五、运行配置
+
+默认配置文件：
+
+```text
+/etc/patrol/config.json
+```
+
+开发时可指定仓库内配置：
+
+```bash
+./build/bin/patrol_system -c config/config.json
+```
+
+常用参数：
 
 ```bash
 ./patrol_system [选项]
-  -d, --device <节点>   摄像头设备 (默认 /dev/video0)
-  -W, --width  <像素>   分辨率宽 (默认 1280)
-  -H, --height <像素>   分辨率高 (默认 720)
-  -f, --fps    <帧率>   期望帧率 (默认 30)
-  -p, --port   <端口>   TCP 监听端口 (默认 8080)
-  -b, --bind   <地址>   监听地址 (默认 0.0.0.0)
-  -v, --verbose         调试日志
+  -c, --config  <路径>   配置文件，默认 /etc/patrol/config.json
+  -d, --device  <节点>   摄像头设备，默认 /dev/video0
+  -W, --width   <像素>   分辨率宽，范围 160 到 4096
+  -H, --height  <像素>   分辨率高，范围 120 到 2160
+  -f, --fps     <帧率>   期望帧率，范围 1 到 120
+  -p, --port    <端口>   TCP 监听端口，范围 1 到 65535
+  -b, --bind    <地址>   监听地址，默认 0.0.0.0
+      --log-dir <目录>   自动生成版本化日志文件
+      --log-file<路径>   指定日志文件
+  -v, --verbose          调试日志
+  -V, --version          显示版本号
+  -h, --help             显示帮助
 ```
 
-在龙芯板子上：
+参数校验在程序启动前完成。非法端口、非法分辨率、非法帧率、空设备名等会直接返回错误，避免进入不确定运行状态。
+
+## 六、摄像头要求
+
+当前视频链路只支持 MJPEG 摄像头。程序会向 V4L2 请求 `V4L2_PIX_FMT_MJPEG`，如果驱动返回 YUYV、NV12 或其他非 MJPEG 格式，程序会拒绝打开该摄像头。
+
+检查摄像头能力：
 
 ```bash
-# 1) 确认摄像头设备
-ls /dev/video*
-v4l2-ctl --list-formats-ext -d /dev/video0   # 可选：确认支持 MJPEG
-
-# 2) 配置网卡 IP（让 LongLook 默认的 192.168.1.100 能连上，或在 LongLook 中填板子实际 IP）
-sudo ip addr add 192.168.1.100/24 dev eth0    # 按实际网卡名
-
-# 3) 启动
-./patrol_system -d /dev/video0 -W 1280 -H 720 -f 30 -p 8080
+v4l2-ctl --list-formats-ext -d /dev/video0
 ```
 
-在 PC 上打开 `LongLook.exe`，填入龙芯 IP（默认 `192.168.1.100`）和端口 `8080`，点「连接」，
-中间视频区即可看到画面。也可命令行自动连：`LongLook.exe 192.168.1.100:8080`。
+如果摄像头不支持 MJPEG，可采取以下处理方式：
 
----
+1. 更换支持 MJPEG 的 UVC 摄像头。
+2. 降低分辨率或帧率后重试。
+3. 后续引入 JPEG 软编码模块，但这会增加 CPU 占用和交叉编译依赖。
 
-## 五、链路验证清单（排查链路问题时按此走）
+## 七、部署说明
 
-1. **网络通不通**：PC 上 `ping 192.168.1.100`，龙芯上 `ping <PC_IP>`。
-2. **端口监听**：龙芯启动后日志应打印 `TCP 服务端已监听 0.0.0.0:8080`。
-3. **防火墙**：确认 PC/龙芯防火墙未拦 8080。
-4. **连接建立**：LongLook 点连接后，龙芯日志出现 `上位机已连接: <PC_IP>:xxxx`，LongLook 日志出现就绪文本。
-5. **视频流**：龙芯日志每秒打印 `视频推流中: N fps`；LongLook 视频区出现画面、右上角叠加分辨率/FPS。
-6. **若画面花屏/无法解码**：多半是摄像头未输出 MJPEG（龙芯日志会告警「非MJPEG」）。换支持 MJPEG 的摄像头，或降低分辨率重试。
-
----
-
-## 六、不接摄像头也能自测链路（推荐先跑一遍）
-
-`test/` 下有一套链路集成测试：用真实的帧协议代码发帧，再用复刻上位机解析逻辑的
-Python 脚本收帧校验，验证“龙芯端发出的字节”与 LongLook 解析器字节级兼容。
+生成部署包：
 
 ```bash
-# 1) 开启测试目标编译
-cmake -S . -B build -DBUILD_TESTS=ON && cmake --build build -j$(nproc)
+./scripts/make_package.sh
+```
 
-# 2) 启动测试服务端（发 文本+传感器+5 个伪视频帧）
+上传到龙芯板：
+
+```bash
+scp patrol_deploy_v<版本>.tar.gz root@<龙芯IP>:/tmp/
+ssh root@<龙芯IP>
+cd /tmp
+tar xzf patrol_deploy_v<版本>.tar.gz
+cd patrol_deploy
+sudo ./install.sh
+```
+
+部署脚本会执行以下高影响操作：
+
+1. 安装 `/usr/bin/patrol_system` 及相关启动脚本。
+2. 安装 systemd 服务 `patrol.service` 和 `patrol-network.service`。
+3. 启用开机自启。
+4. 停用并 mask 系统自带 `wifi-autoconnect.service`，避免它占用 `wlan0` 进入 AP 模式。
+
+如果需要恢复系统自带 WiFi 服务：
+
+```bash
+sudo systemctl unmask wifi-autoconnect.service
+sudo systemctl enable wifi-autoconnect.service
+sudo systemctl start wifi-autoconnect.service
+```
+
+## 八、链路验证
+
+### 不接摄像头的协议自测
+
+```bash
+cmake -S . -B build -DBUILD_TESTS=ON
+cmake --build build -j$(nproc)
+
 ./build/bin/link_test 18080 5 &
-
-# 3) Python 收端校验
 python3 test/frame_parser_check.py 127.0.0.1 18080 3
-# 期望输出：text/sensor/video 计数正常，bad=0，结果「通过 ✅」
 ```
 
-> 也可以让真正的 `LongLook.exe 127.0.0.1:18080` 连接 `link_test` 直接肉眼看链路是否打通。
+期望结果：
 
----
+```text
+text/sensor/video 计数正常
+bad=0
+结果为通过
+```
 
-## 七、关于在 WSL 里直接测试摄像头
+### 实机视频链路检查
 
-WSL2 默认不直通 USB 摄像头。两种办法：
+1. 龙芯板上确认摄像头存在：`ls /dev/video*`。
+2. 龙芯板上确认摄像头支持 MJPEG：`v4l2-ctl --list-formats-ext -d /dev/video0`。
+3. 启动下位机：`./patrol_system -c config/config.json -v`。
+4. PC 上确认能 ping 通龙芯板 IP。
+5. LongLook 连接 `<龙芯IP>:8080`。
+6. 龙芯日志应出现上位机连接、推流帧率和链路状态。
+7. LongLook 视频区应显示画面和帧率。
 
-- **推荐**：把交叉编译/本地编译产物拷到真实龙芯板子上跑，用板子自带 USB 摄像头测试。
-- 若一定要在 WSL 测：用 [usbipd-win](https://github.com/dorssel/usbipd-win) 把 USB 摄像头 attach 进 WSL，
-  并确保 WSL 内核带 UVC 驱动后，`/dev/video0` 才会出现。
+## 九、故障排查
 
----
+### LongLook 连接不上
 
-## 八、后续扩展方向（当前留空）
+1. 确认龙芯日志中存在 `TCP 服务端已监听`。
+2. 确认端口为 `8080` 或与 LongLook 配置一致。
+3. 确认 PC 和龙芯处于同一网段。
+4. 检查防火墙是否拦截 TCP 端口。
+5. 检查部署脚本是否修改了板端 WiFi 服务。
 
-- 传感器/串口：对接 STM32，填充真实 `0x01` 遥测数据。
-- 下行命令 `0x40`：在 `Application::serveClient` 中实现风扇/蜂鸣器/继电器/LED/模式/急停的真实控制。
-- 热成像 `0x20`：对接红外测温模块。
-- 视频：接入识别（YOLO）叠加框，或非 MJPEG 摄像头的 JPEG 软编码。
-- 配置：接入 `config/config.json`（`ConfigManager`），支持文件配置覆盖命令行默认值。
+### 摄像头打不开
+
+1. 确认 `/dev/video0` 存在。
+2. 确认 UVC/V4L2 内核模块已加载。
+3. 使用 `v4l2-ctl` 确认支持 MJPEG。
+4. 降低到 `640x480@30` 后重试。
+
+### 有连接但无视频
+
+1. 检查日志中是否出现非 MJPEG 拒绝信息。
+2. 检查 LongLook 与下位机协议常量是否一致。
+3. 使用 `test/frame_parser_check.py` 排除协议解析问题。
+4. 检查网络是否丢包严重或延迟过高。
+
+### CAN 或 UART 不工作
+
+1. 检查 `config/config.json` 中 `link.type` 是 `can` 还是 `uart`。
+2. CAN 模式下确认接口已 up，例如 `ip link show can1`。
+3. UART 模式下确认设备节点和波特率。
+4. 检查 STM32 固件协议版本是否与龙芯端一致。
+
+## 十、后续补充计划
+
+优先级建议如下：
+
+1. 完成急停、模式切换和手动控制命令的硬件闭环。
+2. 将 `config/patrol.json` 接入任务状态机，实现路线巡检。
+3. 建立传感器遥测字段与 STM32 固件协议的版本化文档。
+4. 增加实机验收记录，包括网络、视频、CAN/UART、状态屏、热成像和开机自启。
+5. 为协议和配置解析增加持续集成检查。
+6. 评估是否需要支持非 MJPEG 摄像头的软件 JPEG 编码。

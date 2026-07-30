@@ -1,1 +1,0 @@
-cmd_/opPJ/PatrolSystem/kernel-modules/compat/vb2compat.o := loongarch64-linux-gnu-ld -m elf64loongarch   -r -o /opPJ/PatrolSystem/kernel-modules/compat/vb2compat.o /opPJ/PatrolSystem/kernel-modules/compat/vb2compat_mod.o /opPJ/PatrolSystem/kernel-modules/compat/frame_vector.o 

@@ -20,6 +20,8 @@ fi
 [ -f "$HERE/VERSION" ] && echo "    部署版本: $(cat "$HERE/VERSION")"
 
 echo "==> [2/7] 停用系统自带 wifi-autoconnect（避免其占用 wlan0 进入 AP 模式）"
+echo "    注意: 此操作会修改板端 WiFi 服务状态，并将 wifi-autoconnect.service 设为 masked。"
+echo "    如需恢复: systemctl unmask wifi-autoconnect.service && systemctl enable --now wifi-autoconnect.service"
 systemctl stop wifi-autoconnect.service 2>/dev/null || true
 systemctl disable wifi-autoconnect.service 2>/dev/null || true
 systemctl mask wifi-autoconnect.service 2>/dev/null || true

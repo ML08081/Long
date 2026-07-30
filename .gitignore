@@ -3,15 +3,24 @@
 /build-loong/
 /build-loong-static/
 *.o
+*.ko
+*.cmd
+*.mod
+*.mod.c
+*.o.d
 *.a
 *.so
 *.out
+Module.symvers
+modules.order
+.tmp_versions/
 
 # 部署包生成物（由 scripts/make_package.sh 生成）
 /patrol_deploy/
 patrol_deploy*.tar.gz
 
 # 编辑器/系统
+.claude/
 .vscode/
 .idea/
 *.swp
