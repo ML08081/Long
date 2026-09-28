@@ -39,6 +39,10 @@ public:
 
     // SPI 状态小屏（ST7789，默认关闭）
     struct DisplayConf {
+        std::string controller = "ST7789";
+        int         xOffset = 0, yOffset = 0;
+        bool        bgr = false, invert = true;
+        int         spiMode = 0;
         bool        enabled = false;
         std::string spiDev  = "/dev/spidev1.0";
         int         gpioDC  = 40;

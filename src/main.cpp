@@ -189,6 +189,12 @@ int main(int argc, char** argv) {
     cfg.display.height  = dc.height;
     cfg.display.spiHz   = static_cast<uint32_t>(dc.spiHz);
     cfg.display.rotation = dc.rotation;
+    cfg.display.controller = dc.controller;
+    cfg.display.xOffset = dc.xOffset;
+    cfg.display.yOffset = dc.yOffset;
+    cfg.display.bgr = dc.bgr;
+    cfg.display.invert = dc.invert;
+    cfg.display.spiMode = dc.spiMode;
 
     bool        verbose = false;
     std::string logDir, logFile;

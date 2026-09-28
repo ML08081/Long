@@ -97,7 +97,14 @@ bool St7789Display::gpioWrite(int n, int val) {
 }
 
 // ─── SPI ─────────────────────────────────────────────────────────────────
+void St7789Display::gpioSet(int n, int val) {
+    if (n >= 0 && !gpioWrite(n, val)) {
+        if (!ioFailed_) LOG_ERROR("屏: GPIO%d 写入失败: %s", n, std::strerror(errno));
+        ioFailed_ = true;
+    }
+}
 bool St7789Display::spiWrite(const uint8_t* d, size_t n) {
+    if (ioFailed_) return false;
     while (n > 0) {
         size_t chunk = n > 4096 ? 4096 : n;   // spidev 单次传输上限保守取 4KB
         spi_ioc_transfer tr{};
@@ -105,7 +112,13 @@ bool St7789Display::spiWrite(const uint8_t* d, size_t n) {
         tr.len    = static_cast<uint32_t>(chunk);
         tr.speed_hz = cfg_.spiHz;
         tr.bits_per_word = 8;
-        if (::ioctl(spiFd_, SPI_IOC_MESSAGE(1), &tr) < 0) return false;
+        const int sent = ::ioctl(spiFd_, SPI_IOC_MESSAGE(1), &tr);
+        if (sent != static_cast<int>(chunk)) {
+            LOG_ERROR("屏: SPI 传输失败: sent=%d expected=%zu (%s)",
+                      sent, chunk, sent < 0 ? std::strerror(errno) : "short transfer");
+            ioFailed_ = true;
+            return false;
+        }
         d += chunk; n -= chunk;
     }
     return true;
@@ -115,6 +128,7 @@ void St7789Display::writeData(const uint8_t* d, size_t n) { gpioSet(cfg_.gpioDC,
 void St7789Display::writeData8(uint8_t d) { writeData(&d, 1); }
 
 void St7789Display::setAddrWindow(int x, int y, int w, int h) {
+    x += cfg_.xOffset; y += cfg_.yOffset;
     int x1 = x + w - 1, y1 = y + h - 1;
     uint8_t buf[4];
     writeCmd(0x2A);   // CASET
@@ -125,24 +139,49 @@ void St7789Display::setAddrWindow(int x, int y, int w, int h) {
 }
 
 bool St7789Display::init(const Config& cfg) {
+    close();
     cfg_ = cfg;
+    ioFailed_ = false;
     if (!cfg_.enabled) return false;
+    const bool st7735 = cfg_.controller == "ST7735S";
+    const bool landscape = cfg_.rotation == 90 || cfg_.rotation == 270;
+    if ((!st7735 && cfg_.controller != "ST7789") ||
+        (cfg_.rotation != 0 && cfg_.rotation != 90 && cfg_.rotation != 180 && cfg_.rotation != 270) ||
+        cfg_.gpioDC < 0 || cfg_.gpioRST < 0 || cfg_.gpioDC == cfg_.gpioRST ||
+        (cfg_.gpioBL >= 0 && (cfg_.gpioBL == cfg_.gpioDC || cfg_.gpioBL == cfg_.gpioRST)) ||
+        cfg_.width <= 0 || cfg_.height <= 0 || cfg_.width > 320 || cfg_.height > 320 ||
+        cfg_.xOffset < 0 || cfg_.yOffset < 0 || cfg_.xOffset > 80 || cfg_.yOffset > 80 ||
+        cfg_.spiHz == 0 || cfg_.spiHz > 40000000 ||
+        cfg_.spiMode < 0 || cfg_.spiMode > 3 ||
+        (st7735 && landscape) || // 当前紧凑界面为128x160竖屏；0/180度均支持
+        (st7735 && (cfg_.width != (landscape ? 160 : 128) ||
+                    cfg_.height != (landscape ? 128 : 160) ||
+                    cfg_.width + cfg_.xOffset > (landscape ? 162 : 132) ||
+                    cfg_.height + cfg_.yOffset > (landscape ? 132 : 162)))) {
+        LOG_ERROR("屏: 控制器/分辨率/方向/GPIO/偏移配置不合法，显示未启动");
+        return false;
+    }
 
     spiFd_ = ::open(cfg_.spiDev.c_str(), O_RDWR);
     if (spiFd_ < 0) {
         LOG_ERROR("屏: 打开 %s 失败: %s", cfg_.spiDev.c_str(), std::strerror(errno));
         return false;
     }
-    uint8_t mode = 0, bits = 8;
-    ::ioctl(spiFd_, SPI_IOC_WR_MODE, &mode);
-    ::ioctl(spiFd_, SPI_IOC_WR_BITS_PER_WORD, &bits);
-    ::ioctl(spiFd_, SPI_IOC_WR_MAX_SPEED_HZ, &cfg_.spiHz);
+    uint8_t mode = static_cast<uint8_t>(cfg_.spiMode), bits = 8;
+    if (::ioctl(spiFd_, SPI_IOC_WR_MODE, &mode) < 0 ||
+        ::ioctl(spiFd_, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
+        ::ioctl(spiFd_, SPI_IOC_WR_MAX_SPEED_HZ, &cfg_.spiHz) < 0) {
+        LOG_ERROR("屏: SPI 参数设置失败: %s", std::strerror(errno));
+        close(); return false;
+    }
 
     // GPIO 初始化
     for (int g : {cfg_.gpioDC, cfg_.gpioRST, cfg_.gpioBL}) {
         if (g < 0) continue;
-        if (!gpioExport(g) || !gpioDir(g, "out"))
-            LOG_WARN("屏: GPIO%d 初始化失败(检查权限/占用)", g);
+        if (!gpioExport(g) || !gpioDir(g, "out")) {
+            LOG_ERROR("屏: GPIO%d 初始化失败(检查权限/占用)", g);
+            close(); return false;
+        }
     }
 
     // 硬复位
@@ -150,24 +189,29 @@ bool St7789Display::init(const Config& cfg) {
     gpioSet(cfg_.gpioRST, 0); ::usleep(20000);
     gpioSet(cfg_.gpioRST, 1); ::usleep(120000);
 
-    // ST7789 初始化序列
-    writeCmd(0x01); ::usleep(150000);            // SWRESET
-    writeCmd(0x11); ::usleep(120000);            // SLPOUT
-    writeCmd(0x3A); writeData8(0x55);            // COLMOD = 16bit/RGB565
+    // 与用户实物参考 TEXR/lloled/Core/Src/oled.c::OLED_Init 保持一致：
+    // 01(120ms),11(120ms),3A=55,36=C0,21,13,29(20ms)，偏移0/0。
+    writeCmd(0x01); ::usleep(st7735 ? 120000 : 150000);
+    writeCmd(0x11); ::usleep(120000);
+    writeCmd(0x3A); writeData8(0x55);
     uint8_t madctl = 0x00;
     switch (cfg_.rotation) { case 90: madctl=0x60; break; case 180: madctl=0xC0; break; case 270: madctl=0xA0; break; }
+    if (st7735) madctl ^= 0xC0;
+    if (cfg_.bgr) madctl |= 0x08;
     writeCmd(0x36); writeData8(madctl);          // MADCTL
-    writeCmd(0x21);                              // INVON (ST7789 IPS 常需反显)
-    writeCmd(0x13);                              // NORON
-    writeCmd(0x29); ::usleep(50000);             // DISPON
+    writeCmd(cfg_.invert ? 0x21 : 0x20);
+    writeCmd(0x13);
+    writeCmd(0x29); ::usleep(st7735 ? 20000 : 50000);
 
     fb_.assign(static_cast<size_t>(cfg_.width) * cfg_.height, 0);
     gpioSet(cfg_.gpioBL, 1);                      // 背光开
     clear(0x0000);
     flush();
-    LOG_INFO("屏: ST7789 %dx%d 就绪 (%s, DC/RST/BL=%d/%d/%d)",
-             cfg_.width, cfg_.height, cfg_.spiDev.c_str(),
-             cfg_.gpioDC, cfg_.gpioRST, cfg_.gpioBL);
+    if (ioFailed_) { close(); return false; }
+    LOG_INFO("屏: %s %dx%d 已发送初始化及清屏 (%s, %uHz mode=%d, DC/RST/BL=%d/%d/%d, offset=%d/%d, BGR=%d, invert=%d)",
+             cfg_.controller.c_str(), cfg_.width, cfg_.height, cfg_.spiDev.c_str(), cfg_.spiHz, cfg_.spiMode,
+             cfg_.gpioDC, cfg_.gpioRST, cfg_.gpioBL, cfg_.xOffset, cfg_.yOffset,
+             cfg_.bgr, cfg_.invert);
     return true;
 }
 
@@ -205,7 +249,7 @@ void St7789Display::drawText(int x, int y, const std::string& s, uint16_t fg, ui
 }
 
 void St7789Display::flush() {
-    if (spiFd_ < 0) return;
+    if (spiFd_ < 0 || ioFailed_) return;
     setAddrWindow(0, 0, cfg_.width, cfg_.height);
     // RGB565 转大端上屏
     std::vector<uint8_t> line(static_cast<size_t>(cfg_.width) * 2);
@@ -216,7 +260,7 @@ void St7789Display::flush() {
             line[x * 2]     = p >> 8;
             line[x * 2 + 1] = p & 0xFF;
         }
-        spiWrite(line.data(), line.size());
+        if (!spiWrite(line.data(), line.size())) return;
     }
 }
 
@@ -295,6 +339,7 @@ int St7789Display::rowLabel(int y, const char* zh, uint16_t col) {
 // ─── 第 1 页：巡检传感数据 ─────────────────────────────────────────────────
 void St7789Display::showSensorPage(const net::SensorData& s) {
     if (spiFd_ < 0) return;
+    if (cfg_.width <= 160) { showCompactSensorPage(s); return; }
     const uint16_t BG=rgb(0,0,0), WHITE=rgb(235,235,235), CYAN=rgb(0,210,230);
     const uint16_t GREEN=rgb(0,200,80), YELL=rgb(245,205,0), RED=rgb(235,45,45);
     // 模式名中文化，与三端语义一致：0 遥控 / 1 循迹 / 2 避障 / 3 巡检
@@ -377,8 +422,9 @@ void St7789Display::showSensorPage(const net::SensorData& s) {
 }
 
 // ─── 第 2 页：中转 / 连接状态 ──────────────────────────────────────────────
-void St7789Display::showRelayPage(const RelayInfo& r) {
+void St7789Display::showRelayPage(const RelayInfo& r, int subpage) {
     if (spiFd_ < 0) return;
+    if (cfg_.width <= 160) { showCompactRelayPage(r, subpage); return; }
     const uint16_t BG=rgb(0,0,0), WHITE=rgb(235,235,235), CYAN=rgb(0,210,230);
     const uint16_t GREEN=rgb(0,210,90), YELL=rgb(245,205,0), RED=rgb(235,45,45);
     const uint16_t GRAY=rgb(90,90,90);
@@ -426,6 +472,93 @@ void St7789Display::showRelayPage(const RelayInfo& r) {
     { int x = rowLabel(y,"运行"); std::snprintf(v,sizeof v,"%u 秒", r.uptimeS);
       drawU8(x,y, v, WHITE, BG); }
 
+    flush();
+}
+
+// 128x160：中文保持16px，信息分成巡检页及三个中转子页。
+void St7789Display::compactTitle(const char* title, const char* index) {
+    const uint16_t bg = rgb(18,64,96);
+    fillRect(0, 0, cfg_.width, 20, bg);
+    drawU8(2, 2, title, rgb(0,225,245), bg);
+    drawText(100, 6, index, 0xFFFF, bg, 1);
+}
+
+void St7789Display::compactRow(int y, const char* label, const std::string& value, uint16_t color) {
+    const int x = drawU8(2, y, label, rgb(170,180,195), 0) + 4;
+    drawU8(x, y, value, color, 0);
+}
+
+void St7789Display::showCompactSensorPage(const net::SensorData& s) {
+    const uint16_t white=rgb(235,235,235), cyan=rgb(0,210,230), gray=rgb(100,100,100);
+    const uint16_t green=rgb(0,200,80), yellow=rgb(245,205,0), red=rgb(235,45,45);
+    static const char* modes[] = {"遥控","循迹","避障","巡检"};
+    static const char* risks[] = {"SAFE","NOTE","WARN","DANGER"};
+    const uint16_t colors[] = {green,cyan,yellow,red};
+    const bool stale = s.fault != 0;
+    const bool dht = !stale && (s.flags & net::SF_DHT_OK);
+    clear(0);
+    compactTitle("巡检状态", "1/4");
+    compactRow(22, "模式", stale ? "离线" : modes[s.mode & 3], stale ? red : cyan);
+    compactRow(40, "距离", !stale && s.distance_cm ? std::to_string(s.distance_cm)+"cm" : "无", white);
+    compactRow(58, "激光", !stale && s.laser_cm ? std::to_string(s.laser_cm)+"cm" : "无", white);
+    compactRow(76, "气体", stale ? "无" : std::to_string(s.gas_ppm),
+               !stale && (s.flags & net::SF_GAS_ALARM) ? red : white);
+    compactRow(94, "温度", dht ? std::to_string(s.temperature_01c/10)+"C" : "无", dht ? white : gray);
+    compactRow(112,"湿度", dht ? std::to_string(s.humidity_01/10)+"%" : "无", dht ? white : gray);
+    const uint16_t riskBg = stale ? gray : colors[s.risk_level & 3];
+    fillRect(0, 130, 128, 30, riskBg);
+    drawText(4, 133, stale ? "NO LINK" : std::string("RISK ")+risks[s.risk_level & 3], 0, riskBg, 1);
+    const char* flag = stale ? "无连接" :
+        (s.flags & net::SF_OBS_LOCK) ? "锁停" :
+        (s.flags & net::SF_FLAME) ? "火警" :
+        (s.flags & net::SF_GAS_ALARM) ? "气体" : "";
+    drawU8(4, 144, flag, 0, riskBg);
+    flush();
+}
+
+void St7789Display::showCompactRelayPage(const RelayInfo& r, int subpage) {
+    const uint16_t white=rgb(235,235,235), cyan=rgb(0,210,230);
+    const uint16_t green=rgb(0,210,90), yellow=rgb(245,205,0), red=rgb(235,45,45);
+    clear(0);
+    if (subpage == 0) {
+        compactTitle("连接状态", "2/4");
+        compactRow(24, "上位机", r.upperOnline ? "在线" : "离线", r.upperOnline ? green : red);
+        drawU8(2, 46, "本机", cyan, 0);
+        drawText(4, 66, r.localIp.empty() ? "--" : r.localIp, white, 0, 1);
+        drawU8(2, 84, "地址", cyan, 0);
+        const std::string peer = r.upperOnline ? r.upperPeer : "--";
+        // IPv4:port 最长21字符，分两行，避免右侧裁掉端口。
+        drawText(4, 104, peer.substr(0, 15), white, 0, 1);
+        drawText(4, 116, peer.size() > 15 ? peer.substr(15) : "", white, 0, 1);
+        compactRow(138, "时长", r.upperOnline ? std::to_string(r.upperDurS)+"s" : "无", white);
+    } else if (subpage == 1) {
+        compactTitle("中转状态", "3/4");
+        compactRow(24, "下位机", r.f4Open ? (r.telemFresh ? "正常" : "无数据") : "未接",
+                   r.f4Open ? (r.telemFresh ? green : yellow) : red);
+        compactRow(46, "遥测", std::to_string(r.telemCnt), r.telemFresh ? green : white);
+        compactRow(68, "环境", std::to_string(r.envCnt), r.envFresh ? green : white);
+        drawU8(2, 92, "热成像", cyan, 0);
+        drawU8(2, 112, std::to_string(r.thermalCnt)+"帧", white, 0);
+        compactRow(136, "温度", r.thermalMaxC10 > -1000 ? std::to_string(r.thermalMaxC10/10)+"C" : "无",
+                   r.hotspot ? red : white);
+    } else {
+        compactTitle("视觉状态", "4/4");
+        compactRow(24, "视觉", r.visionOn ? "在线" : "关闭", r.visionOn ? green : white);
+        // UTF-8 整字换行，保留原视觉名称，最多两行（16个汉字/32个ASCII）。
+        const std::string name = r.visionOn ? r.visionName : "--";
+        int x = 0, y = 46;
+        for (size_t i = 0; i < name.size() && y <= 64;) {
+            const unsigned char c = static_cast<unsigned char>(name[i]);
+            const size_t n = c < 0x80 ? 1 : ((c & 0xE0) == 0xC0 ? 2 : 3);
+            const int width = n == 1 ? 8 : 16;
+            if (x + width > 128) { x = 0; y += 18; }
+            if (y > 64 || i + n > name.size()) break;
+            drawU8(x, y, name.substr(i,n), green, 0); x += width; i += n;
+        }
+        drawU8(2, 84, r.visionOn ? std::to_string(r.visionConf)+"%" : "--", green, 0);
+        compactRow(108, "版本", std::string("v")+r.version, white);
+        compactRow(136, "运行", std::to_string(r.uptimeS)+"s", white);
+    }
     flush();
 }
 

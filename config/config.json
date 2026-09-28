@@ -29,16 +29,22 @@
     "_note": "device=控制/遥测(双向, link.type=uart 时为主链路/=can 时回退); thermal_device=热成像专线(F4 USART1→此口, 只收0x5B/0x5D/0x5E, 永不上CAN)"
   },
   "display": {
+    "controller": "ST7735S",
     "enabled": 1,
     "spi_device": "/dev/spidev1.0",
     "gpio_dc": 72,
     "gpio_rst": 73,
-    "gpio_bl": 74,
-    "width": 240,
-    "height": 320,
-    "spi_hz": 40000000,
+    "gpio_bl": -1,
+    "width": 128,
+    "height": 160,
+    "spi_hz": 1000000,
+    "spi_mode": 3,
+    "x_offset": 0,
+    "y_offset": 0,
+    "bgr": 0,
+    "invert": 1,
     "rotation": 0,
-    "_note": "GMT020-02 ST7789V 240x320 接 2K0300 IO排针: SCL=PIN21(SPI2_CLK) SDA=PIN27(SPI2_MOSI) CS=PIN23(SPI2_CSn) VCC=PIN2(3.3V,勿接PIN30=5V) GND=PIN1。DC=PIN7=GPIO72 RST=PIN9=GPIO73 BL=PIN11=GPIO74。颜色反删驱动0x21(INVON);红蓝反MADCTL加0x08(BGR);方向改rotation",
-    "_can_conflict": "实测方案(2026-07-20): CAN 走 can1(CAN3=pin74/75), 屏 DC=72/RST=73 不动。屏 BL 从信号脚 pin74 让给 CAN3_TX → BL 并到屏 VCC 的 3.3V 常亮(切 CAN 时 gpio_bl=-1 驱动跳过背光脚)。3.3V 只有 IO_PIN2+ADC_PIN1 两脚且被屏占: CAN 收发器 VCC 不必找新脚, 与屏 VCC 并联共享同一 3.3V 即可(电源可一分多)。绝不能 up can0。详见 docs/CAN迁移-龙芯端使能指南.md §0.5"
+    "_note": "ST7735S 1.8寸128x160，初始化对齐TEXR/lloled/Core/Src/oled.c。SDA=IO27(SPI2_MO), SCL=IO21(SPI2_CK), CS=IO23, DC=IO7(GPIO72), RST=IO9(GPIO73)。VDD/BLK接外部3.3V，共地；不从龙芯P3V3取电。",
+    "_can_conflict": "IO7/9由屏幕GPIO占用，原生CAN2(can0)不能占用72/73。保留已有patrol-screen-pinmux服务；BLK固定接3.3V，不使用GPIO74。"
   }
 }

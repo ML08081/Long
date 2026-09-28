@@ -239,11 +239,11 @@ void Application::controlLoop() {
     LOG_INFO("控制线程退出");
 }
 
-// 显示线程：SPI 小屏双页轮播。fb_ 全帧缓冲 + flush() 整帧推送 = 无闪烁，
-// 故用 ~4Hz(250ms) 高频重绘保证数据实时性；每页停留 kDwellMs 后自动切页。
+// 显示线程：大屏双页，小屏将中转信息拆分，避免超出128x160。
 // 上电即绘制首帧（不依赖上位机连接），独立运行。
 void Application::displayLoop() {
-    LOG_INFO("显示线程启动（ST7789 双页轮播 @ ~4Hz 实时刷新, 每页 5s）");
+    const int pageCount = 1 + display_.relayPageCount();
+    LOG_INFO("显示线程启动（%s %d页轮播；巡检8s，其余每页4s）", cfg_.display.controller.c_str(), pageCount);
     // ★ 2026-07-23 提升灵敏度：刷新 250ms->150ms(≈6.7Hz)；
     //   传感页是现场主要盯的页面，停留时间加长，中转页缩短。
     const uint32_t kRefreshMs      = 150;   // 刷新周期 ≈ 6.7Hz（fb_ 整帧推送，无闪烁）
@@ -257,11 +257,11 @@ void Application::displayLoop() {
             robot_.fillSensorData(s);
             display_.showSensorPage(s);
         } else {
-            display_.showRelayPage(buildRelayInfo());
+            display_.showRelayPage(buildRelayInfo(), page - 1);
         }
         if (!interruptibleSleep(kRefreshMs)) break;
         const uint32_t dwell = (page == 0) ? kDwellSensorMs : kDwellRelayMs;
-        if (nowMs() - pageSinceMs >= dwell) { pageSinceMs = nowMs(); page ^= 1; }
+        if (nowMs() - pageSinceMs >= dwell) { pageSinceMs = nowMs(); page = (page + 1) % pageCount; }
     }
     LOG_INFO("显示线程退出");
 }

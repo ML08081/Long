@@ -59,6 +59,14 @@ bool ConfigManager::load(const std::string& path) {
 
     const json::JsonNode& disp = root["display"];
     if (disp.is_object()) {
+        display_.controller = disp["controller"].string_or(display_.controller);
+        display_.xOffset = static_cast<int>(disp["x_offset"].int_or(0));
+        display_.yOffset = static_cast<int>(disp["y_offset"].int_or(0));
+        const bool st7735 = display_.controller == "ST7735S";
+        display_.bgr = disp["bgr"].int_or(0) != 0;
+        display_.invert = disp["invert"].int_or(1) != 0;
+        display_.spiMode = static_cast<int>(disp["spi_mode"].int_or(st7735 ? 3 : 0));
+        if (st7735) { display_.width = 128; display_.height = 160; display_.spiHz = 1000000; }
         display_.enabled  = disp["enabled"].int_or(display_.enabled ? 1 : 0) != 0;
         display_.spiDev   = disp["spi_device"].string_or(display_.spiDev);
         display_.gpioDC   = static_cast<int>(disp["gpio_dc"].int_or(display_.gpioDC));

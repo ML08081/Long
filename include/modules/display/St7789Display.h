@@ -8,7 +8,7 @@
 #include "modules/network/FrameProtocol.h"
 
 // =============================================================================
-//  St7789Display — 龙芯端 SPI 小屏驱动（ST7789 240x240，用户空间）
+//  St7789Display — 龙芯端 ST7789 / ST7735S SPI 小屏驱动（保留旧类名兼容调用方）
 //
 //  硬件：SPI 走 /dev/spidev1.0（板载 SPI2，已实测 status=okay）；
 //        DC/RST/BL 用 sysfs GPIO（/sys/class/gpio，已实测 export 可用）。
@@ -32,6 +32,11 @@ public:
         int         height  = 320;   // GMT020-02 (ST7789V) 原生 240x320
         uint32_t    spiHz   = 40000000;
         int         rotation = 0;    // 0/90/180/270（MADCTL）
+        std::string controller = "ST7789";
+        int         xOffset = 0, yOffset = 0; // 当前方向下可视区起点
+        bool        bgr = false;
+        bool        invert = true;
+        int         spiMode = 0; // lloled 软件时序：空闲高、上升沿采样，对应 mode 3
     };
 
     ~St7789Display();
@@ -73,11 +78,17 @@ public:
 
     // 高层页面（1Hz 刷新，轮播切换）
     void showSensorPage(const net::SensorData& s);   // 第 1 页：巡检传感数据
-    void showRelayPage(const RelayInfo& r);          // 第 2 页：中转/连接状态
+    void showRelayPage(const RelayInfo& r, int subpage = 0);
+    int relayPageCount() const { return cfg_.width <= 160 ? 3 : 1; }
     // 兼容旧接口（等价于 showSensorPage）
     void showStatus(const net::SensorData& s, const std::string& statusLine);
 
 private:
+    friend struct DisplayTestAccess;
+    void showCompactSensorPage(const net::SensorData& s);
+    void showCompactRelayPage(const RelayInfo& r, int subpage);
+    void compactTitle(const char* title, const char* index);
+    void compactRow(int y, const char* label, const std::string& value, uint16_t color);
     // 16x16 中文点阵（码点二分查找），未收录字返回 nullptr
     static const uint8_t* cjkGlyph(uint32_t cp);
     void drawCjk(int x, int y, uint32_t cp, uint16_t fg, uint16_t bg, int scale = 1);  // 16*scale
@@ -95,10 +106,11 @@ private:
     static bool gpioExport(int n);
     static bool gpioDir(int n, const char* dir);
     static bool gpioWrite(int n, int val);
-    void gpioSet(int n, int val) { if (n >= 0) gpioWrite(n, val); }
+    void gpioSet(int n, int val);
 
     Config cfg_;
     int    spiFd_ = -1;
+    bool   ioFailed_ = false;
     std::vector<uint16_t> fb_;   // 后备缓冲（RGB565，主机字节序）
 };
 

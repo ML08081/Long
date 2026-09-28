@@ -1,6 +1,7 @@
 # 构建产物
 /build/
 /build-loong/
+/build-display-test/
 /build-loong-static/
 *.o
 *.ko
