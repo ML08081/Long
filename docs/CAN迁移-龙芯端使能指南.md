@@ -1,5 +1,7 @@
 # CAN 迁移 · 龙芯端使能指南（P0 摸底 + 起 can0 + 切换链路）
 
+> **2026-09-28 GPIO编号勘误（优先于下文历史记录）**：按龙芯2K0300官方数据手册，CAN2_TX=GPIO73、CAN2_RX=GPIO72，CAN3_TX=GPIO75、CAN3_RX=GPIO74。下文历史记录将各组TX/RX的GPIO号写反，不能作为GPIO配置依据。久久派物理IO7=CAN2_TX、IO9=CAN2_RX不变；本项目屏幕应配置DC=73、RST=72，无需换线。详情及来源见 `ST7735S-128x160-v1.24.0.md`。此勘误不改变现有USB-CAN can2配置。
+
 > 配套代码：`src/modules/can/CanManager.{h,cpp}`、`include/modules/can/CanProtocol.h`
 > 依据文档：`方案文档/自主巡检系统实施方案_CAN与PCB.md` §3.7；`方案文档/项目进度与开发交接_2026-07-17.md`
 > 本轮范围：**只做 CAN 基础层软件**（传输层 + 类 SDO 客户端 + 链路健康）。ArUco/路线表 Mission 下一轮。

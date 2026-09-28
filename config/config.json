@@ -32,19 +32,19 @@
     "controller": "ST7735S",
     "enabled": 1,
     "spi_device": "/dev/spidev1.0",
-    "gpio_dc": 72,
-    "gpio_rst": 73,
+    "gpio_dc": 73,
+    "gpio_rst": 72,
     "gpio_bl": -1,
     "width": 128,
     "height": 160,
     "spi_hz": 1000000,
-    "spi_mode": 3,
+    "spi_mode": 0,
     "x_offset": 0,
     "y_offset": 0,
     "bgr": 0,
     "invert": 1,
     "rotation": 0,
-    "_note": "ST7735S 1.8寸128x160，初始化对齐TEXR/lloled/Core/Src/oled.c。SDA=IO27(SPI2_MO), SCL=IO21(SPI2_CK), CS=IO23, DC=IO7(GPIO72), RST=IO9(GPIO73)。VDD/BLK接外部3.3V，共地；不从龙芯P3V3取电。",
+    "_note": "ST7735S 1.8寸128x160，初始化对齐TEXR/lloled/Core/Src/oled.c。SDA=IO27(SPI2_MO), SCL=IO21(SPI2_CK), CS=IO23, DC=IO7/CAN2_TX(GPIO73), RST=IO9/CAN2_RX(GPIO72)。VDD/BLK接外部3.3V，共地；不从龙芯P3V3取电。",
     "_can_conflict": "IO7/9由屏幕GPIO占用，原生CAN2(can0)不能占用72/73。保留已有patrol-screen-pinmux服务；BLK固定接3.3V，不使用GPIO74。"
   }
 }

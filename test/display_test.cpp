@@ -34,7 +34,7 @@ extern "C" int __wrap_close(int fd) {
 extern "C" ssize_t __wrap_write(int fd,const void* p,size_t n) {
     if (!handles.count(fd)) return __real_write(fd,p,n);
     if (failGpio) { errno=EIO; return -1; }
-    if (handles[fd]=="/sys/class/gpio/gpio72/value") dc=*(const char*)p=='1';
+    if (handles[fd]=="/sys/class/gpio/gpio73/value") dc=*(const char*)p=='1';
     return static_cast<ssize_t>(n);
 }
 extern "C" int __wrap_access(const char* p,int mode) {
@@ -87,9 +87,9 @@ int main(int argc,char** argv) {
     using namespace patrol;
     St7789Display::Config c;
     c.enabled=true; c.controller="ST7735S"; c.width=128; c.height=160;
-    c.gpioDC=72; c.gpioRST=73; c.gpioBL=-1; c.spiHz=1000000; c.spiMode=3;
+    c.gpioDC=73; c.gpioRST=72; c.gpioBL=-1; c.spiHz=1000000; c.spiMode=0;
     St7789Display d;
-    assert(d.init(c)); assert(spiMode==3); assert(d.relayPageCount()==3);
+    assert(d.init(c)); assert(spiMode==0); assert(d.relayPageCount()==3);
     // Reference: TEXR/lloled/Core/Src/oled.c OLED_Init, not a generic tab profile.
     std::vector<unsigned char> cmds;
     for (const auto& t:transfers) if (!t.data) cmds.push_back(t.bytes.at(0));
