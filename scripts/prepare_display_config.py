@@ -12,7 +12,7 @@ raw = current.read_bytes()
 old = json.loads(raw.decode("utf-8-sig"))
 new = dict(old)
 new["display"] = json.loads(profile.read_text(encoding="utf-8-sig"))["display"]
-assert new["display"]["controller"] == "ST7735S"
+assert new["display"]["controller"] in {"ST7735S", "ST7789"}
 assert all(new[k] == v for k, v in old.items() if k != "display")
 output.write_text(json.dumps(new, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
 print("Original config SHA256:", hashlib.sha256(raw).hexdigest())

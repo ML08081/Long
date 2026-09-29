@@ -29,22 +29,22 @@
     "_note": "device=控制/遥测(双向, link.type=uart 时为主链路/=can 时回退); thermal_device=热成像专线(F4 USART1→此口, 只收0x5B/0x5D/0x5E, 永不上CAN)"
   },
   "display": {
-    "controller": "ST7735S",
+    "controller": "ST7789",
     "enabled": 1,
     "spi_device": "/dev/spidev1.0",
     "gpio_dc": 73,
     "gpio_rst": 72,
     "gpio_bl": -1,
-    "width": 128,
-    "height": 160,
-    "spi_hz": 1000000,
+    "width": 240,
+    "height": 320,
+    "spi_hz": 12000000,
     "spi_mode": 0,
     "x_offset": 0,
     "y_offset": 0,
     "bgr": 0,
     "invert": 1,
     "rotation": 0,
-    "_note": "ST7735S 1.8寸128x160，初始化对齐TEXR/lloled/Core/Src/oled.c。SDA=IO27(SPI2_MO), SCL=IO21(SPI2_CK), CS=IO23, DC=IO7/CAN2_TX(GPIO73), RST=IO9/CAN2_RX(GPIO72)。VDD/BLK接外部3.3V，共地；不从龙芯P3V3取电。",
+    "_note": "GMT020-02 ST7789V 240x320大屏，两页轮播。SDA=IO27(SPI2_MOSI), SCL=IO21(SPI2_CLK), CS=IO23(SPI2_CS), DC=IO7/CAN2_TX(GPIO73), RST=IO9/CAN2_RX(GPIO72)。VDD/BLK接3.3V，共地；屏幕严禁接IO30的5V。",
     "_can_conflict": "IO7/9由屏幕GPIO占用，原生CAN2(can0)不能占用72/73。保留已有patrol-screen-pinmux服务；BLK固定接3.3V，不使用GPIO74。"
   }
 }

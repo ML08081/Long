@@ -72,15 +72,17 @@ static std::vector<unsigned char> commandData(unsigned char cmd) {
             return transfers[i+1].data ? transfers[i+1].bytes : std::vector<unsigned char>{};
     return {};
 }
-static void frameCheck() {
-    assert(commandData(0x2A)==(std::vector<unsigned char>{0,0,0,127}));
-    assert(commandData(0x2B)==(std::vector<unsigned char>{0,0,0,159}));
+static void frameCheck(int width=128, int height=160) {
+    assert(commandData(0x2A)==(std::vector<unsigned char>{0,0,
+        static_cast<unsigned char>((width-1)>>8),static_cast<unsigned char>((width-1)&255)}));
+    assert(commandData(0x2B)==(std::vector<unsigned char>{0,0,
+        static_cast<unsigned char>((height-1)>>8),static_cast<unsigned char>((height-1)&255)}));
     bool pixels=false; size_t bytes=0;
     for (const auto& t:transfers) {
         if (!t.data && t.bytes==std::vector<unsigned char>{0x2C}) pixels=true;
         else if (pixels) { assert(t.data); bytes+=t.bytes.size(); }
     }
-    assert(bytes==128*160*2);
+    assert(bytes==static_cast<size_t>(width)*height*2);
 }
 int main(int argc,char** argv) {
     assert(argc==2);
@@ -123,5 +125,7 @@ int main(int argc,char** argv) {
     transfers.clear(); assert(d.init(c)); assert(d.relayPageCount()==1);
     assert(commandData(0x36)==std::vector<unsigned char>{0});
     assert(spiMode==0);
-    std::puts("PASS: lloled init, frame bounds/length, four pages, offline, I/O errors, ST7789 compatibility");
+    transfers.clear(); d.showSensorPage(s); frameCheck(240,320);
+    transfers.clear(); d.showRelayPage(r); frameCheck(240,320);
+    std::puts("PASS: ST7735S compact pages, ST7789 two pages, frame bounds, offline and I/O errors");
 }
