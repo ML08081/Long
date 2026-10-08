@@ -110,8 +110,6 @@ private:
     QLabel *m_valEnc2 = nullptr;
     QLabel *m_valSpeedL = nullptr;
     QLabel *m_valSpeedR = nullptr;
-    QLabel *m_valServo = nullptr;
-    QLabel *m_valVoltage = nullptr;
     QLabel *m_valMode = nullptr;
     QLabel *m_valFault = nullptr;
     // 视觉与风险
@@ -155,9 +153,16 @@ private:
     QLabel             *m_lblVision = nullptr;   // 状态/检测数
     QImage              m_lastFrame;             // 最近一帧原始视频（用于叠加）
     QVector<Detection>  m_lastDets;              // 最近一次检测结果
+    int                 m_visionFireHits = 0;
+    int                 m_visionSmokeHits = 0;
+    int                 m_visionFireMisses = 0;
+    int                 m_visionSmokeMisses = 0;
+    bool                m_visionFireActive = false;
+    bool                m_visionSmokeActive = false;
 
     // 热成像时域平滑：对相邻帧做像素 EMA 混合，低帧率下不跳变、观感更流畅
     QImage              m_thermalAccum;          // 累积混合图（与热像同尺寸）
+    qint64              m_lastThermalMs = 0;     // 超时清除旧画面，避免把历史热点当实时值
 };
 
 #endif // MAINWINDOW_H

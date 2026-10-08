@@ -83,6 +83,7 @@ private:
     QTimer     *m_connectTimer = nullptr;  // 单次连接超时计时器
     bool        m_connecting   = false;    // 正在连接阶段（区分建链后断开）
     int         m_attempt      = 0;        // 当前已尝试次数
+    bool        m_driveEnabled = true;     // 仅显式切到手动模式后允许 FRAME_DRIVE
 };
 
 #endif // NETCLIENT_H

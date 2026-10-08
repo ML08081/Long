@@ -54,7 +54,9 @@ public:
 
     // —— 过程数据（无确认，直接 write，非阻塞）——
     // 命令帧(0x201，兼心跳)：speed/steering 会被限幅到 [-1000,1000]。
-    bool sendCommand(int16_t speed, int16_t steering, uint8_t mode);
+    // visionAlarm: 0=无, 1=烟雾, 2=火焰；作为周期命令字节随心跳自动失效。
+    bool sendCommand(int16_t speed, int16_t steering, uint8_t mode,
+                     uint8_t visionAlarm = 0);
     // 0x301 sub=0x01 巡检命令
     bool sendPatrolCmd(uint8_t cmd, uint8_t flags);
     // 0x301 sub=0x02 到点动作（放行 + 下一步）

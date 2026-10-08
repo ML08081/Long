@@ -13,6 +13,8 @@
 
 #include <string.h>
 
+volatile uint8_t g_remote_vision_alarm = 0;
+
 #ifndef PID_TUNING_ENABLED
 #define PID_TUNING_ENABLED 0
 #endif
@@ -420,6 +422,7 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                 c.speed    = (int16_t)(((uint16_t)d[0] << 8) | d[1]);
                 c.steering = (int16_t)(((uint16_t)d[2] << 8) | d[3]);
                 c.mode     = d[4];
+                g_remote_vision_alarm = (rh.DLC >= 6U && d[5] <= 2U) ? d[5] : 0U;
                 g_remote_data  = c;
                 g_remote_ready = 1;
                 g_can_rx_cmd_cnt++;

@@ -49,7 +49,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     // 视觉识别边车（预留接口，默认关闭）。模型/解释器可在此处切换。
     m_vision = new VisionProcessor(this);
-    // m_vision->setModelPath("F:/projectForXN/NGFXM/best.pt");  // 换模型改这里即可
+    m_vision->setModelPath("F:/projectForXN/NGFXM/YOLO模型/fire_smoke_yolov8n.pt");
     connect(m_vision, &VisionProcessor::detections,   this, &MainWindow::onVisionDetections);
     connect(m_vision, &VisionProcessor::statusChanged, this, &MainWindow::onVisionStatus);
     connect(m_vision, &VisionProcessor::logMessage,   this, &MainWindow::onLog);
@@ -148,7 +148,7 @@ QWidget *MainWindow::buildTopBar()
     lay->addWidget(m_lblConnStatus);
 
     // 自动发现指示：局域网内发现龙芯广播即显示其 IP/版本（IP 变了也能看见）
-    m_lblDiscovered = new QLabel("🔍 未发现开发板");
+    m_lblDiscovered = new QLabel("未发现开发板");
     m_lblDiscovered->setObjectName("Discovered");
     lay->addSpacing(12);
     lay->addWidget(m_lblDiscovered);
@@ -187,8 +187,6 @@ QWidget *MainWindow::buildLeftColumn()
     m_valEnc2    = mot->addValue("编码器2", "—");
     m_valSpeedL  = mot->addValue("左轮速度", "—");
     m_valSpeedR  = mot->addValue("右轮速度", "—");
-    m_valServo   = mot->addValue("转向舵机", "— us");
-    m_valVoltage = mot->addValue("电池电压", "— V");
     m_valMode    = mot->addValue("工作模式", "—");
     m_valFault   = mot->addValue("故障标志", "—");
     v->addWidget(mot);
@@ -408,6 +406,7 @@ void MainWindow::onDisconnected()
     m_videoView->clearImage();
     m_thermalView->clearImage();
     m_lblThermalRange->setText("量程: —");
+    m_lastThermalMs = 0;
     setRisk(0);
     m_lastFrame = QImage();
     m_lastDets.clear();
@@ -424,7 +423,7 @@ void MainWindow::onDisconnected()
 // UDP 自动发现龙芯：IP 变化(如切到手机热点 DHCP)也能自动跟上并连接。
 void MainWindow::onDiscovered(const QString &ip, quint16 port, const QString &version)
 {
-    m_lblDiscovered->setText(QString("🔍 %1 v%2").arg(ip).arg(version));   // 顶栏持续显示最新发现
+    m_lblDiscovered->setText(QString("开发板: %1 v%2").arg(ip).arg(version));   // 顶栏持续显示最新发现
     if (version != m_discoveredVer) {   // 版本变化才打日志，避免每 2s 刷屏
         m_discoveredVer = version;
         onLog(QString("发现开发板 %1:%2（v%3）").arg(ip).arg(port).arg(version));
@@ -523,8 +522,6 @@ void MainWindow::onSensorUpdated(const LL::SensorData &d)
     m_valEnc2->setText(QString::number(d.encoder2));
     m_valSpeedL->setText(QString::number(d.speed_L));
     m_valSpeedR->setText(QString::number(d.speed_R));
-    m_valServo->setText("未接入");
-    m_valVoltage->setText("未接入");
     m_valMode->setText(QString("%1 (%2)").arg(modeName(d.mode)).arg(d.mode));
     // 下拉框回显：让 UI 跟随下位机【真实】模式（可能被龙芯/急停改过），
     // 用 m_modeSyncing 抑制 currentIndexChanged 再把命令发回去，避免回环。
@@ -554,10 +551,10 @@ void MainWindow::onSensorUpdated(const LL::SensorData &d)
         l->setStyleSheet(on ? "color:#e53935; font-weight:bold;" : "color:#43a047;");
     };
     // 火焰/气体：F4 传感器（0x5C flags）真实数据；障碍：激光+超声波双重确认
-    setBool(m_valFlame,    d.flame(),    "检测到火焰", "正常");
+    setBool(m_valFlame,    d.flame() || m_visionFireActive,
+            d.flame() ? "火焰传感器报警" : "视觉识别火焰", "正常");
     setBool(m_valGasAlarm, d.gasAlarm(), "气体超阈",   "正常");
-    // "烟雾识别"复用为 F4 障碍确认（VL53+超声波双重验证）
-    setBool(m_valSmoke,    d.obstacle(), "障碍确认",   "无障碍");
+    setBool(m_valSmoke,    m_visionSmokeActive, "视觉识别烟雾", "未识别");
     setRisk(d.risk_level);   // 风险等级：龙芯按超声波距离推导
 
     // 时间戳
@@ -618,6 +615,10 @@ void MainWindow::onVisionToggled(bool on)
     m_vision->setEnabled(on);
     if (!on) {
         m_lastDets.clear();
+        m_visionFireHits = m_visionSmokeHits = 0;
+        m_visionFireMisses = m_visionSmokeMisses = 0;
+        m_visionFireActive = m_visionSmokeActive = false;
+        m_net->sendVision(0, 0, 0, QString());
         refreshVideo();        // 恢复原始画面
     }
     m_lblVision->setText(on ? "视觉: 启动中..." : "视觉: 关闭");
@@ -631,21 +632,55 @@ void MainWindow::onVisionDetections(const QVector<Detection> &dets)
     // 汇总并回传龙芯：龙芯才是"大脑"，由它据此判断（本地仅叠加显示）。
     quint8 flags = 0, maxConf = 0;
     QString topClass;
+    bool fireNow = false, smokeNow = false;
+    int fireConf = 0, smokeConf = 0;
     for (const Detection &d : dets) {
         int c = qBound(0, int(d.conf * 100), 100);
         if (c >= maxConf) { maxConf = quint8(c); topClass = d.cls; }
         const QString cl = d.cls.toLower();
         if (cl.contains("person") || cl.contains("people") || cl.contains("人"))
             flags |= LL::VIS_PERSON;
-        if (cl.contains("fire") || cl.contains("flame") || cl.contains("火"))
-            flags |= LL::VIS_FIRE;
+        if (cl.contains("fire") || cl.contains("flame") || cl.contains("火")) {
+            fireNow = true;
+            fireConf = qMax(fireConf, c);
+        }
+        if (cl.contains("smoke") || cl.contains("烟")) {
+            smokeNow = true;
+            smokeConf = qMax(smokeConf, c);
+        }
     }
+
+    // 连续两帧才报警，避免单帧误报；高置信火焰立即报警。消失后连续
+    // 三帧才解除，避免边缘置信度波动导致蜂鸣器频繁开关。
+    if (fireNow) {
+        m_visionFireHits++;
+        m_visionFireMisses = 0;
+        if (m_visionFireHits >= 2 || fireConf >= 75) m_visionFireActive = true;
+    } else {
+        m_visionFireHits = 0;
+        if (++m_visionFireMisses >= 3) m_visionFireActive = false;
+    }
+    if (smokeNow) {
+        m_visionSmokeHits++;
+        m_visionSmokeMisses = 0;
+        if (m_visionSmokeHits >= 2) m_visionSmokeActive = true;
+    } else {
+        m_visionSmokeHits = 0;
+        if (++m_visionSmokeMisses >= 3) m_visionSmokeActive = false;
+    }
+    if (m_visionFireActive) flags |= LL::VIS_FIRE;
+    if (m_visionSmokeActive) flags |= LL::VIS_SMOKE;
     m_net->sendVision(quint8(qMin(dets.size(), 255)), maxConf, flags, topClass);
 
     m_lblVision->setText(dets.isEmpty()
         ? "视觉: 运行中 · 无目标"
         : QString("视觉: 运行中 · 目标 %1 · %2 %3%")
               .arg(dets.size()).arg(topClass).arg(maxConf));
+
+    m_valFlame->setText(m_visionFireActive ? "视觉识别火焰" : "正常");
+    m_valFlame->setStyleSheet(m_visionFireActive ? "color:#e53935; font-weight:bold;" : "color:#43a047;");
+    m_valSmoke->setText(m_visionSmokeActive ? "视觉识别烟雾" : "未识别");
+    m_valSmoke->setStyleSheet(m_visionSmokeActive ? "color:#e53935; font-weight:bold;" : "color:#43a047;");
 }
 
 void MainWindow::onVisionStatus(bool running)
@@ -663,23 +698,16 @@ void MainWindow::onVisionStatus(bool running)
 
 void MainWindow::onThermalFrame(const QImage &img, double minC, double maxC)
 {
-    // 时域 EMA 混合：热像帧率低(~1-2fps)，直接刷会跳变卡顿；与上一帧按 0.5 混合，
-    // 再平滑放大，观感明显更流畅（下位机帧率不变，纯显示端优化）。
+    // 显示最新一帧，不与历史帧做时域混合。旧版 50% 累积会让热点移动和温度
+    // 变化多滞后一到数帧，巡检现场更需要及时性而不是拖影。
     QImage cur = img.convertToFormat(QImage::Format_RGB888);
-    if (m_thermalAccum.size() != cur.size()) {
-        m_thermalAccum = cur;
-    } else {
-        const int n = cur.width() * cur.height() * 3;
-        uchar *a = m_thermalAccum.bits();
-        const uchar *b = cur.constBits();
-        for (int i = 0; i < n; ++i)
-            a[i] = uchar((int(a[i]) + int(b[i])) / 2);
-    }
+    m_thermalAccum = cur;
     // 平滑放大到较大尺寸，避免像素块状（24x32 -> 更细腻）
     QImage shown = m_thermalAccum.scaled(m_thermalAccum.width() * 8,
                                          m_thermalAccum.height() * 8,
                                          Qt::KeepAspectRatio, Qt::SmoothTransformation);
     m_thermalView->setImage(shown);
+    m_lastThermalMs = QDateTime::currentMSecsSinceEpoch();
     m_lblThermalRange->setText(QString("量程: %1 ~ %2 °C   (%3x%4)")
                                .arg(minC, 0, 'f', 1).arg(maxC, 0, 'f', 1)
                                .arg(img.width()).arg(img.height()));
@@ -721,6 +749,14 @@ void MainWindow::onRateTick()
     const int hz = m_sensorCount;
     m_valSensorHz->setText(QString("%1 Hz").arg(hz));
     m_sensorCount = 0;
+
+    if (m_lastThermalMs > 0 &&
+        QDateTime::currentMSecsSinceEpoch() - m_lastThermalMs >= 3000) {
+        m_thermalView->clearImage();
+        m_thermalAccum = QImage();
+        m_lblThermalRange->setText("量程: —（数据超时）");
+        m_lastThermalMs = 0;
+    }
 
     // ★链路健康：连着却长时间收不到传感器帧 = F4 数据冻结（正是"连接在、数值不动"的掉线）。
     if (!m_net->isConnected()) {

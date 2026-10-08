@@ -148,6 +148,11 @@ bool NetClient::sendRaw(const QByteArray &data)
 
 bool NetClient::sendCommand(quint8 cmdId, quint8 value)
 {
+    /* 模式命令是遥控帧闸门的唯一开关。非手动模式下，即使手柄定时器仍有
+       一拍旧事件，也不能再用 FRAME_DRIVE 把龙芯/F4 抢回手动模式。 */
+    if (cmdId == LL::CMD_MODE)
+        m_driveEnabled = ((value & 0x03U) == 0U);
+
     QByteArray payload;
     payload.append(char(cmdId));
     payload.append(char(value));
@@ -169,7 +174,9 @@ bool NetClient::sendCommand(quint8 cmdId, quint8 value)
 
 bool NetClient::sendDrive(qint16 speed, qint16 steering)
 {
-    // payload：speed i16 LE + steering i16 LE（龙芯据此切 MANUAL 并转发同步命令给 F4）
+    if (!m_driveEnabled) return false;
+
+    // payload：speed i16 LE + steering i16 LE（仅手动模式由龙芯转发给 F4）
     QByteArray payload;
     uchar le[4];
     qToLittleEndian<qint16>(speed,    le);
@@ -344,6 +351,9 @@ void NetClient::parseSensor(const QByteArray &payload)
     s.servo_us        = rdU16();
     s.voltage_mV      = rdU16();
     s.mode            = rdU8();
+    /* 看到真实设备已在自主模式时只做单向关断；重新允许遥控必须由用户
+       显式发送 MODE=0，避免延迟遥测把闸门意外打开。 */
+    if ((s.mode & 0x03U) != 0U) m_driveEnabled = false;
     s.fault           = rdU8();
     s.risk_level      = rdU8();
     s.flags           = rdU8();

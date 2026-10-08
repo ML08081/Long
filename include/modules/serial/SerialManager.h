@@ -31,9 +31,11 @@ public:
         uint32_t rawFrames   = 0;   // 组装完成的原始帧数
         uint32_t eeFrames    = 0;   // 组装完成的 EEPROM 份数
         uint32_t crcDrop     = 0;   // 因 XOR 校验失败被丢弃的分块数
+        uint32_t malformed   = 0;   // idx/cnt 越界或长度不符合协议
         uint8_t  rawMaxIdx   = 0;   // 见过的最大分块序号（判断尾块是否缺失的关键）
         uint8_t  rawLastIdx  = 0;   // 最近一个分块序号
         uint32_t rawIncomplete = 0; // 新一帧开始(idx=0)时上一帧仍未凑齐的次数
+        uint32_t eeIncomplete  = 0; // EEPROM 新一轮开始时上一轮仍缺块
     };
     ThermalDiag thermalDiag() const { return tdiag_; }
 
@@ -78,6 +80,8 @@ private:
     //   旧实现只在"本块末字触达总长"时触发，尾块一旦丢失整帧就永远不完成且无迹可寻。
     uint32_t                rawMask_ = 0;
     bool                    rawFired_ = false;
+    uint32_t                eeMask_ = 0;
+    bool                    eeFired_ = false;
     ThermalDiag             tdiag_{};
 };
 

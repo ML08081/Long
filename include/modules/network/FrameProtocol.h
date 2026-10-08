@@ -48,6 +48,7 @@ enum FrameType : uint8_t {
 enum VisionFlag : uint8_t {
     VIS_PERSON = 0x01,   // 检测到人
     VIS_FIRE   = 0x02,   // 检测到火焰/火源
+    VIS_SMOKE  = 0x04,   // 检测到烟雾
 };
 
 // 下行命令 ID（执行与联动模块控制）

@@ -2,6 +2,7 @@
 #include "modules/serial/Protocol.h"
 #include "modules/logger/Logger.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
@@ -158,18 +159,29 @@ void SerialManager::poll() {
         } else if (base[1] == RAW_THERM_MARKER || base[1] == EEPROM_MARKER) {
             // ---- 原始热成像 / EEPROM 分块: [AA][MARK][idx][cnt][cnt*2 BE][XOR] ----
             if (size - off < 4) break;                 // 需要 idx,cnt
+            const bool isEe = (base[1] == EEPROM_MARKER);
+            const int total = isEe ? MLX_EE_WORDS : MLX_FRAME_WORDS;
+            constexpr int kRawChunks = (MLX_FRAME_WORDS + MLX_CHUNK_WORDS - 1) / MLX_CHUNK_WORDS;
+            constexpr int kEeChunks  = (MLX_EE_WORDS + MLX_CHUNK_WORDS - 1) / MLX_CHUNK_WORDS;
+            const int needChunks = isEe ? kEeChunks : kRawChunks;
             uint8_t idx = base[2];
             uint8_t cnt = base[3];
+            const int startWord = static_cast<int>(idx) * MLX_CHUNK_WORDS;
+            const int expectedCnt = (idx < needChunks)
+                ? std::min(MLX_CHUNK_WORDS, total - startWord) : -1;
+            // 先验证头字段再按 cnt 等待，避免坏 cnt 把后续正确分块一起滞留。
+            if (idx >= needChunks || cnt != expectedCnt) {
+                ++tdiag_.malformed;
+                ++off;
+                continue;
+            }
             size_t  need = static_cast<size_t>(4) + static_cast<size_t>(cnt) * 2 + 1;
             if (size - off < need) break;              // 半包
             uint8_t crc = xorChecksum(base, 4 + cnt * 2);
             if (crc != base[need - 1]) { ++tdiag_.crcDrop; ++off; continue; }  // 失步
 
-            const bool isEe = (base[1] == EEPROM_MARKER);
-            const int total = isEe ? MLX_EE_WORDS : MLX_FRAME_WORDS;
             uint16_t* dst   = isEe ? eeAsm_ : rawAsm_;
             const uint8_t* p = base + 3 + 1;           // 跳过 idx,cnt
-            int startWord = static_cast<int>(idx) * MLX_CHUNK_WORDS;
             for (int i = 0; i < cnt; ++i) {
                 int w = startWord + i;
                 if (w < total) dst[w] = rdU16(p + i * 2);
@@ -177,8 +189,17 @@ void SerialManager::poll() {
 
             if (isEe) {
                 ++tdiag_.eeChunks;
-                // EEPROM 832 字正好 26 块整除，末块必然触达总长，沿用原判定即可
-                if (startWord + cnt >= total) {
+                // 双副本的第二个 idx=0 是重复块；完成一轮或已越过 idx0 后再见
+                // idx0 才开启新一轮，确保缺块 EEPROM 绝不会进入参数解算。
+                if (idx == 0 && (eeFired_ || (eeMask_ & ~1u) != 0u)) {
+                    if (eeMask_ != 0 && !eeFired_) ++tdiag_.eeIncomplete;
+                    eeMask_ = 0;
+                    eeFired_ = false;
+                }
+                eeMask_ |= (1u << idx);
+                constexpr uint32_t kEeFullMask = (1u << kEeChunks) - 1u;
+                if (!eeFired_ && (eeMask_ & kEeFullMask) == kEeFullMask) {
+                    eeFired_ = true;
                     ++tdiag_.eeFrames;
                     if (eepromCb_) eepromCb_(eeAsm_, MLX_EE_WORDS);
                 }
@@ -196,8 +217,7 @@ void SerialManager::poll() {
                 if (idx < 32) rawMask_ |= (1u << idx);
 
                 // 834 字需要 ceil(834/32)=27 块全部到齐才算一整帧（末块只有 2 字）
-                constexpr int kNeedChunks = (MLX_FRAME_WORDS + MLX_CHUNK_WORDS - 1) / MLX_CHUNK_WORDS;
-                constexpr uint32_t kFullMask = (1u << kNeedChunks) - 1u;
+                constexpr uint32_t kFullMask = (1u << kRawChunks) - 1u;
                 if (!rawFired_ && (rawMask_ & kFullMask) == kFullMask) {
                     rawFired_ = true;
                     ++tdiag_.rawFrames;

@@ -117,17 +117,19 @@ bool CanManager::sendRaw(uint32_t cobId, const uint8_t* d, uint8_t len) {
     return true;
 }
 
-bool CanManager::sendCommand(int16_t speed, int16_t steering, uint8_t mode) {
+bool CanManager::sendCommand(int16_t speed, int16_t steering, uint8_t mode,
+                             uint8_t visionAlarm) {
     speed    = std::max<int16_t>(-1000, std::min<int16_t>(1000, speed));
     steering = std::max<int16_t>(-1000, std::min<int16_t>(1000, steering));
-    // 载荷大端（与 F4 can_link 一致）：spd i16, str i16, mode u8
-    uint8_t p[5];
+    // 载荷大端（与 F4 can_link 一致）：spd i16, str i16, mode u8, visionAlarm u8
+    uint8_t p[6];
     p[0] = static_cast<uint8_t>((static_cast<uint16_t>(speed)    >> 8) & 0xFF);
     p[1] = static_cast<uint8_t>( static_cast<uint16_t>(speed)          & 0xFF);
     p[2] = static_cast<uint8_t>((static_cast<uint16_t>(steering) >> 8) & 0xFF);
     p[3] = static_cast<uint8_t>( static_cast<uint16_t>(steering)       & 0xFF);
     p[4] = static_cast<uint8_t>(mode & 0x03);
-    return sendRaw(can_proto::COBID_CMD, p, 5);
+    p[5] = static_cast<uint8_t>(std::min<uint8_t>(visionAlarm, 2));
+    return sendRaw(can_proto::COBID_CMD, p, 6);
 }
 
 bool CanManager::sendPatrolCmd(uint8_t cmd, uint8_t flags) {

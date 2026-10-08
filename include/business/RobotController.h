@@ -76,7 +76,8 @@ public:
 
     // 手动速度/转向（MANUAL 模式使用；预留给上位机摇杆扩展）
     void setManual(int16_t speed, int16_t steering);
-    // 上位机手动驱动（FRAME_DRIVE）：切到 MANUAL、解除急停并设定速度/转向
+    // 上位机手动驱动（FRAME_DRIVE）：仅在已明确处于 MANUAL 且未急停时接受。
+    // 模式切换必须走 CMD_MODE，避免残留的手柄心跳抢占自动巡检。
     void driveManual(int16_t speed, int16_t steering);
     void setMode(uint8_t mode);
     void emergencyStop();
@@ -193,7 +194,9 @@ private:
     // 热成像热点（atomic，fillSensorData 无锁读取，避免与 thermalMtx_ 交叉锁）
     std::atomic<int>  thermalMaxC10_{-1000};   // 最高温 ×10（°C），-1000=无数据
     std::atomic<bool> thermalHotspot_{false};  // 最高温超阈（疑似火源/过热）
+    std::atomic<uint32_t> thermalLastMs_{0};   // 最近有效热像解算时间；用于清除陈旧热点
     static constexpr float kHotspotThreshC = 50.0f;  // 热点告警阈值 °C
+    static constexpr uint32_t kThermalFreshMs = 3000; // 超过 3s 未刷新视为无实时热像
 
     // 热成像解算器（龙芯端解算, 替代 F4 解算）+ 解算输出缓冲
     // ★解算(ExtractParameters/CalculateTo)只在 solverThread_ 内跑——绝不占用控制线程，

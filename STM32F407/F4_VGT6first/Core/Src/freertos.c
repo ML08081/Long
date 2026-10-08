@@ -457,10 +457,11 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Infinite loop */
+  /* 独立蜂鸣器快速节拍：环境任务含 DHT11 阻塞读，不能承担报警节奏。 */
   for(;;)
   {
-    osDelay(1000);
+    Buzzer_Tick(20U);
+    osDelay(20U);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -914,7 +915,19 @@ void StartMotionControlTask(void *argument)
     int16_t left_speed  = current_speed;
     int16_t right_speed = current_speed;
 
-    if (!remote_active)
+    const uint8_t autonomous_mode =
+        (current_mode == MODE_LINE_ONLY || current_mode == MODE_LINE_VISION) ? 1U : 0U;
+
+    if (autonomous_mode)
+    {
+      /* 自主巡检快环属于 F4 本地控制，不受上位机遥控帧年龄影响。
+         CAN 短暂断流时仍持续循线；模式/急停命令恢复后会立即接管。 */
+      CLAMP_SPD(left_speed);
+      CLAMP_SPD(right_speed);
+      s_last_left_spd  = left_speed;
+      s_last_right_spd = right_speed;
+    }
+    else if (!remote_active)
     {
       s_last_left_spd = current_speed;
       s_last_right_spd = current_speed;
@@ -1296,8 +1309,10 @@ void Env(void *argument)
      （偶发成功把 s_dht_fail 清零），就永远达不到 3 次，
      即使实际刷新率已经低到几十秒一次，上位机看到的仍是 dhtOk=1 的陈旧值。
      加一个绝对新鲜度判据：超过 DHT_STALE_MS 没有成功读到，一律判无效。 */
-  #define DHT_STALE_MS   15000U    /* 采样周期 2s，15s 没成功 = 真的坏了 */
+  #define DHT_SAMPLE_MS   2100U    /* DHT11 不允许快速重读，留出略大于 2s 的裕量 */
+  #define DHT_STALE_MS    7000U    /* 连续约 3 个采样周期无成功就明确标无效 */
   static uint32_t s_dht_ok_ms = 0;
+  static uint32_t s_dht_next_ms = 0;
 
   /* 障碍双重验证阈值：VL53(mm) 与 超声波(cm) 同时近才确认 */
   #define ENV_OBST_TH_MM   300U   /* 30cm */
@@ -1320,18 +1335,15 @@ void Env(void *argument)
     uint16_t vl53_mm = g_vl53_mm;                    /* RangingTask 发布 */
     uint8_t  vl53_ok = (vl53_mm != VL53_OUT_OF_RANGE);
 
-    /* ---- DHT11：每 2 秒读一次（★手册要求采样间隔≥2s，原 1s 太快必频繁失败，
-       是"温湿度只刷新一次后冻结"的根因）+ 失败重试 + 连续失败去抖 ---- */
-    if ((cycle % 20U) == 0U)
+    /* ---- DHT11：严格按 >=2s 单次采样。旧版失败后每 30ms 连读三次，传感器
+       尚未完成内部测量就再次收到起始脉冲，既不能提高成功率，还连续占用实时任务。 */
+    uint32_t nowMs = HAL_GetTick();
+    if (s_dht_next_ms == 0U || (int32_t)(nowMs - s_dht_next_ms) >= 0)
     {
       int8_t  t = s_temp;
       uint8_t h = s_humi;
-      uint8_t ok = 0;
-      for (uint8_t retry = 0; retry < 3U && !ok; retry++)   /* 失败重试最多3次 */
-      {
-        ok = DHT11_Read(&t, &h);
-        if (!ok) osDelay(30);                                /* 重试前小憩，让单总线复位 */
-      }
+      uint8_t ok = DHT11_Read(&t, &h);
+      s_dht_next_ms = HAL_GetTick() + DHT_SAMPLE_MS;
       if (ok)
       {
         s_temp = t; s_humi = h;     /* 更新最后有效值 */
@@ -1360,12 +1372,17 @@ void Env(void *argument)
     /* ---- 3. 报警等级 + 蜂鸣 + PD2 联动 ---- */
     uint8_t       alarm;
     BuzzerPattern pat;
-    if (flame || gas_alarm)      { alarm = ALARM_LV_FIRE; pat = BUZZER_ALARM; }
-    else if (obstacle)           { alarm = ALARM_LV_WARN; pat = BUZZER_WARN;  }
-    else                         { alarm = ALARM_LV_NONE; pat = BUZZER_OFF;   }
+    uint8_t remoteVisionAlarm = g_remote_active ? g_remote_vision_alarm : 0U;
+    if (flame)                   { alarm = ALARM_LV_FIRE; pat = BUZZER_FLAME;    }
+    else if (remoteVisionAlarm == 2U)
+                                { alarm = ALARM_LV_FIRE; pat = BUZZER_FLAME;    }
+    else if (gas_alarm)          { alarm = ALARM_LV_FIRE; pat = BUZZER_GAS;      }
+    else if (remoteVisionAlarm == 1U)
+                                { alarm = ALARM_LV_FIRE; pat = BUZZER_GAS;      }
+    else if (obstacle)           { alarm = ALARM_LV_WARN; pat = BUZZER_OBSTACLE; }
+    else                         { alarm = ALARM_LV_NONE; pat = BUZZER_OFF;      }
 
     Buzzer_SetPattern(pat);
-    Buzzer_Tick(100);
     HAL_GPIO_WritePin(ALARM_OUT_GPIO_Port, ALARM_OUT_Pin,
                       (alarm == ALARM_LV_FIRE) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
@@ -1400,8 +1417,9 @@ void Env(void *argument)
       LOG("[DIST] ultra(HC)=%ucm pulse=%uus | laser(VL53)=%umm ok=%u okcnt=%lu | remote=%u",
           hc_cm, (unsigned)HC_GetLastPulse_us(), vl53_mm, vl53_ok,
           g_vl53_ok_cnt, g_remote_active);
-      LOG("[ENV]  gas=%u T=%dC H=%u%% dhtOk=%u fail=%u flame=%u obst=%u",
-          gas_raw, (int)s_temp, s_humi, s_dht_ok, s_dht_fail, flame, obstacle);
+      LOG("[ENV]  gas=%u T=%dC H=%u%% dhtOk=%u fail=%u err=%u flame=%u obst=%u",
+          gas_raw, (int)s_temp, s_humi, s_dht_ok, s_dht_fail,
+          (unsigned)DHT11_GetLastError(), flame, obstacle);
       /* 循迹核查：L/C/R=压线(1)/离线(0)，J=路口 X=丢线。压/离黑线时应即时翻转 */
       { uint8_t lb = g_line_bits;
         LOG("[LINE] L=%u C=%u R=%u  J=%u X=%u  (bits=0x%02X)",
@@ -1471,11 +1489,16 @@ void Thermal(void *argument)
     if (bootRetry)
       LOG("[THERM] init OK after %lu retries", (unsigned long)bootRetry);
   }
-  LOG("[THERM] init OK -> raw-forward: 0x5E EEPROM(once)+0x5D frames via USART1");
+  LOG("[THERM] init OK -> USART1@115200 EEPROM hash=%08lX double-send",
+      (unsigned long)Thermal_GetEEFingerprint());
+  /* MLX90640 在 General Call Reset 后需要重新进入测量状态。等待一个完整的
+     2Hz 刷新周期，避免刚配置完成就把“尚未就绪”误判成故障并再次复位。 */
+  osDelay(600);
 
   uint8_t  frame[FRAME_MLXCHUNK_MAXLEN];
   uint8_t  eeSent = 0;
-  uint32_t loopCnt = 0, framesSent = 0;
+  uint32_t loopCnt = 0, framesSent = 0, txFail = 0;
+  uint32_t nextEeMs = 0;
   uint8_t  hushLogged = 0;
   uint16_t failStreak = 0;   /* 连续原始帧读取失败计数：坏态自恢复触发 */
   for (;;)
@@ -1491,20 +1514,36 @@ void Thermal(void *argument)
        其余时刻持续转发（不再因 g_remote_active=0 而停发→龙芯热成像不再冻结）。 */
     if (!pidTesting)
     {
-      if (!eeSent)
+      if (!eeSent && (nextEeMs == 0U || (int32_t)(HAL_GetTick() - nextEeMs) >= 0))
       {
         const uint16_t *ee = Thermal_GetEE();
+        uint8_t eeTxOk = 1;
         for (uint8_t idx = 0; (int)idx * MLX_CHUNK_WORDS < MLX_EE_WORDS; idx++)
         {
           int start = (int)idx * MLX_CHUNK_WORDS;
           int rem   = MLX_EE_WORDS - start;
           uint8_t cnt = (rem >= MLX_CHUNK_WORDS) ? MLX_CHUNK_WORDS : (uint8_t)rem;
           uint8_t len = Protocol_PackMlxChunk(FRAME_EEPROM_MARKER, idx, &ee[start], cnt, frame);
-          HAL_UART_Transmit(&huart1, frame, len, 50);
-          osDelay(2);
+          /* EEPROM 决定所有温度解算参数，每块发两遍。龙芯按 idx 位图去重，
+             任一副本通过校验即可，优先保证标定参数可靠到达。 */
+          for (uint8_t copy = 0; copy < 2U; copy++) {
+            if (HAL_UART_Transmit(&huart1, frame, len, 500) != HAL_OK) {
+              eeTxOk = 0;
+              txFail++;
+            }
+          }
         }
-        eeSent = 1;
-        LOG("[THERM] EEPROM forwarded");
+        if (eeTxOk) {
+          eeSent = 1;
+          nextEeMs = HAL_GetTick() + 10000U;
+          LOG("[THERM] EEPROM forwarded hash=%08lX recover=%lu (2 copies/chunk)",
+              (unsigned long)Thermal_GetEEFingerprint(),
+              (unsigned long)Thermal_GetEERecoverCount());
+        } else {
+          nextEeMs = HAL_GetTick() + 1000U;
+          LOG("[THERM] EEPROM TX failed, retry next loop (txFail=%lu)",
+              (unsigned long)txFail);
+        }
       }
 
       int rf = Thermal_ReadRawSubpage();
@@ -1512,23 +1551,27 @@ void Thermal(void *argument)
       {
         failStreak = 0;
         const uint16_t *raw = Thermal_GetRawFrame();
+        uint8_t rawTxOk = 1;
         for (uint8_t idx = 0; (int)idx * MLX_CHUNK_WORDS < MLX_FRAME_WORDS; idx++)
         {
           int start = (int)idx * MLX_CHUNK_WORDS;
           int rem   = MLX_FRAME_WORDS - start;
           uint8_t cnt = (rem >= MLX_CHUNK_WORDS) ? MLX_CHUNK_WORDS : (uint8_t)rem;
           uint8_t len = Protocol_PackMlxChunk(FRAME_RAWTHERM_MARKER, idx, &raw[start], cnt, frame);
-          HAL_UART_Transmit(&huart1, frame, len, 50);
-          osDelay(2);
+          if (HAL_UART_Transmit(&huart1, frame, len, 500) != HAL_OK) {
+            rawTxOk = 0;
+            txFail++;
+            break;
+          }
         }
-        framesSent++;
+        if (rawTxOk) framesSent++;
       }
       else
       {
         /* MLX 连续读失败=传感器掉坏态(供电/EMI/地弹后停刷)。就绪位轮询现已超时
            返回(见 MLX90640_API.c 修复)，不再永久挂死；此处连续 ~2s(10×200ms)
            失败即重初始化 MLX 恢复，USART1(PA9) 热成像输出可自愈，不需重启 F4。 */
-        if (++failStreak >= 10U)
+        if (++failStreak >= 3U)
         {
           /* ★ 2026-07-23：先做【总线级】恢复再重初始化。
              MLX90640 在供电波动/EMI 下会在传输中途挂死并把 SDA 一直拉低，
@@ -1540,17 +1583,28 @@ void Thermal(void *argument)
           LOG("[THERM] raw read fail x%u -> I2C3 bus recover(%s, cnt=%lu) + re-init",
               failStreak, busOk ? "SDA released" : "SDA STILL LOW",
               (unsigned long)I2C_RecoverCount());
-          if (Thermal_Init() == 0) { eeSent = 0; failStreak = 0; LOG("[THERM] re-init OK, EEPROM will resend"); }
-          else                     { failStreak = 0; osDelay(1000); LOG("[THERM] re-init FAILED, retry later"); }
+          if (Thermal_Init() == 0) {
+            /* 标定副本未变化，重初始化不抢占串口重复发 EEPROM；周期重发仍能
+               覆盖龙芯晚启动。等待一个刷新周期后再读取，防止复位风暴。 */
+            failStreak = 0;
+            osDelay(600);
+            LOG("[THERM] re-init OK, calibration retained");
+          } else {
+            failStreak = 0;
+            osDelay(2000);
+            LOG("[THERM] re-init FAILED, retry in 2s");
+          }
         }
+        else osDelay(50);
       }
       if ((++loopCnt % 10U) == 0U)
-        LOG("[THERM] raw-forward remote=%u frames_sent=%lu", g_remote_active, framesSent);
-      /* 周期重发 EEPROM(每 ~150 拍≈30s)：中途才连上/重连的龙芯也能取到标定参数解算，
-         否则重连后热成像永远解不出(EEPROM 只在上电发过一次)。 */
-      if ((loopCnt % 150U) == 0U) eeSent = 0;
+        LOG("[THERM] raw-forward remote=%u frames_sent=%lu txFail=%lu",
+            g_remote_active, framesSent, txFail);
+      /* 每 10s 重发双副本 EEPROM，龙芯晚启动/重启后最多等待 10s 即可恢复标定。 */
+      if (eeSent && (int32_t)(HAL_GetTick() - nextEeMs) >= 0) eeSent = 0;
     }
-    osDelay(200);   /* ~2Hz/子页 */
+    /* GetFrameData 内部等待 data-ready；这里只做最小让步，不再额外固定等待 200ms。 */
+    osDelay(5);
   }
 #else
   for (;;) { osDelay(1000); }

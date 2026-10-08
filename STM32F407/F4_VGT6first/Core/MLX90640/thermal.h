@@ -31,6 +31,10 @@ float   Thermal_GetTa(void);
 /* ---- 原始帧转发模式（解算下放龙芯）---- */
 /* EEPROM 标定数据(832 字)，Thermal_Init 里已 DumpEE 填充，上电转发给龙芯一次 */
 const uint16_t* Thermal_GetEE(void);
+/* EEPROM 内容指纹（FNV-1a），用于与龙芯重组结果对比。 */
+uint32_t Thermal_GetEEFingerprint(void);
+/* 运行期有效 EEPROM 副本指纹异常后的自动恢复次数。 */
+uint32_t Thermal_GetEERecoverCount(void);
 /* 只读一个子页原始数据(不解算)。0=成功，负=失败 */
 int  Thermal_ReadRawSubpage(void);
 /* 最近一次读到的原始帧(834 字) */

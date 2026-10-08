@@ -110,3 +110,13 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# CubeIDE/CMake 链接后自动刷新烧录文件。旧工程只更新 ELF，会让烧录工具
+# 反复写入历史 HEX；将转换绑定到目标后可保证源码、ELF 和 HEX 始终同版。
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.hex
+    COMMENT "Generating current F4_VGT6first.hex from linked ELF"
+    VERBATIM
+)
