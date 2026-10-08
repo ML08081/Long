@@ -1,0 +1,23 @@
+{
+  "note": "Existing visual fire/smoke dependency snapshot; no retraining.",
+  "files": [
+    {
+      "repository_path": "YOLO模型/fire_smoke_yolov8n.pt",
+      "source_path": "/mnt/f/projectForXN/NGFXM/YOLO模型/fire_smoke_yolov8n.pt",
+      "sha256": "1c98c1b9513d83c77c9103b32b699cea0ef142fcd12768e57d15453c6e8be3af",
+      "bytes": 6249770
+    },
+    {
+      "repository_path": "YOLO模型/validate_model.py",
+      "source_path": "/mnt/f/projectForXN/NGFXM/YOLO模型/validate_model.py",
+      "sha256": "f61e7e4dcc49106bbd1797e7c6126a21d02f7bef1d720d64218d8b21f342e803",
+      "bytes": 2987
+    },
+    {
+      "repository_path": "YOLO模型/模型说明与验证.md",
+      "source_path": "/mnt/f/projectForXN/NGFXM/YOLO模型/模型说明与验证.md",
+      "sha256": "8f07752b7729d39d5f7b3d89668f2c122ab8934e9ef757ae0fa2306dd2d68c89",
+      "bytes": 1427
+    }
+  ]
+}
