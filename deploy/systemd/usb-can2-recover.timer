@@ -1,0 +1,11 @@
+[Unit]
+Description=Check PCAN USB connection every 5 seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=5s
+AccuracySec=1s
+Unit=usb-can2-recover.service
+
+[Install]
+WantedBy=timers.target

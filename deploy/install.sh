@@ -52,6 +52,11 @@ echo "==> [7/7] 启用开机自启"
 systemctl enable patrol-network.service
 systemctl enable patrol.service
 
+# CAN setup follows the retained board configuration; UART installations stay optional.
+if grep -Eq '"type"[[:space:]]*:[[:space:]]*"can"' /etc/patrol/config.json; then
+    sh "$HERE/scripts/install_usb_can_recovery.sh" --install-only
+fi
+
 echo ""
 echo "=================== 部署完成 ==================="
 echo " 立即连接WiFi: systemctl start patrol-network"

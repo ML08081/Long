@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify and bring up PCAN USB interface can2 at 500 kbit/s
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/loong-usb-can-up can2 500000
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

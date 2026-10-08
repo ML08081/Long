@@ -1,5 +1,7 @@
 # CAN 迁移 · 龙芯端使能指南（P0 摸底 + 起 can0 + 切换链路）
 
+> **2026-10-08 业务配置更新（优先于下文历史记录）**：当前业务使用 PCAN USB `can2`、500 kbps，默认 `link.type=can`。已加入固定命名、5 秒恢复定时器与 DFU 诊断。`canN` 编号不代表硬件身份；旧文档中“can0=板载 CAN2”的映射不适用于 USB 适配器重新枚举的情况。实施、验收和回退见 [USB-CAN稳定命名与自动恢复_2026-10-08.md](USB-CAN稳定命名与自动恢复_2026-10-08.md)。
+
 > **2026-09-28 GPIO编号勘误（优先于下文历史记录）**：按龙芯2K0300官方数据手册，CAN2_TX=GPIO73、CAN2_RX=GPIO72，CAN3_TX=GPIO75、CAN3_RX=GPIO74。下文历史记录将各组TX/RX的GPIO号写反，不能作为GPIO配置依据。久久派物理IO7=CAN2_TX、IO9=CAN2_RX不变；本项目屏幕应配置DC=73、RST=72，无需换线。详情及来源见 `ST7735S-128x160-v1.24.0.md`。此勘误不改变现有USB-CAN can2配置。
 
 > 配套代码：`src/modules/can/CanManager.{h,cpp}`、`include/modules/can/CanProtocol.h`

@@ -1,0 +1,8 @@
+[Unit]
+Description=Recover PCAN USB naming, link configuration and application connection
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/loong-usb-can-up can2 500000 recover
+TimeoutStartSec=30

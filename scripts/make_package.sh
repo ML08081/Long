@@ -44,7 +44,7 @@ fi
 echo ""
 echo "==> [3/4] 组装部署包 (v$VER)"
 rm -rf "$PKG"
-mkdir -p "$PKG/config" "$PKG/scripts" "$PKG/systemd"
+mkdir -p "$PKG/config" "$PKG/scripts" "$PKG/systemd" "$PKG/modprobe"
 cp "$BIN"                                          "$PKG/patrol_system"
 cp "$ROOT/VERSION"                                 "$PKG/VERSION"
 cp "$ROOT/config/config.json"                      "$PKG/config/config.json"
@@ -54,6 +54,12 @@ cp "$ROOT/deploy/scripts/health_check.sh"          "$PKG/scripts/health_check.sh
 cp "$ROOT/deploy/systemd/patrol.service"           "$PKG/systemd/patrol.service"
 cp "$ROOT/deploy/systemd/patrol-network.service"   "$PKG/systemd/patrol-network.service"
 cp "$ROOT/deploy/systemd/can0.service"             "$PKG/systemd/can0.service"
+cp "$ROOT/deploy/scripts/loong-usb-can-up.sh"       "$PKG/scripts/loong-usb-can-up.sh"
+cp "$ROOT/deploy/scripts/install_usb_can_recovery.sh" "$PKG/scripts/install_usb_can_recovery.sh"
+cp "$ROOT/deploy/modprobe/pcan-can2.conf"           "$PKG/modprobe/pcan-can2.conf"
+for unit in usb-can2.service usb-can2-recover.service usb-can2-recover.timer patrol-usb-can2.conf; do
+    cp "$ROOT/deploy/systemd/$unit" "$PKG/systemd/$unit"
+done
 cp "$ROOT/deploy/network.conf"                     "$PKG/network.conf"
 cp "$ROOT/deploy/wpa_supplicant.conf"              "$PKG/wpa_supplicant.conf"
 cp "$ROOT/deploy/install.sh"                        "$PKG/install.sh"

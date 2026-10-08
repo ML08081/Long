@@ -14,12 +14,12 @@
     "peer_note": "上位机 LongLook 作为 TCP 客户端；龙芯板 IP 请在 LongLook 中配置"
   },
   "link": {
-    "type": "uart",
-    "can_if": "can1",
+    "type": "can",
+    "can_if": "can2",
     "bitrate": 500000,
     "node_id": 1,
-    "_note": "F4 传输层选择: type=can 走 SocketCAN(can_if), type=uart 走 serial.device(回退)。当前默认 uart, 切 CAN 时改 type=can 一键切换, 上层零改动。",
-    "_can_if_note": "实测(2026-07-20): 板子 can0=CAN2(pin72/73=屏DC/RST), can1=CAN3(pin74/75=屏BL+空脚)。推荐 can1: 屏 DC/RST 不动、只挪 BL 到3V3(gpio_bl=-1)。绝不能 up can0(会抢屏72/73)。详见 docs/CAN迁移-龙芯端使能指南.md §0.5"
+    "_note": "业务默认使用 USB-CAN：type=can，can_if=can2，500000 bit/s。UART 仅作为手动配置的备用传输，不是自动回退。",
+    "_can_if_note": "can2 为单个 PCAN USB 适配器的固定业务名；驱动 assign=pcan32:can2，恢复脚本通过 /proc/pcan 核实 USB 身份。接口编号不是板载引脚身份；禁止按 can0/can1 名称猜测并启用板载控制器。"
   },
   "serial": {
     "device": "/dev/ttyS1",
@@ -45,6 +45,6 @@
     "invert": 1,
     "rotation": 0,
     "_note": "GMT020-02 ST7789V 240x320大屏，两页轮播。SDA=IO27(SPI2_MOSI), SCL=IO21(SPI2_CLK), CS=IO23(SPI2_CS), DC=IO7/CAN2_TX(GPIO73), RST=IO9/CAN2_RX(GPIO72)。VDD/BLK接3.3V，共地；屏幕严禁接IO30的5V。",
-    "_can_conflict": "IO7/9由屏幕GPIO占用，原生CAN2(can0)不能占用72/73。保留已有patrol-screen-pinmux服务；BLK固定接3.3V，不使用GPIO74。"
+    "_can_conflict": "屏幕占用 GPIO72/73，禁止操作对应板载 CAN 控制器；保留 patrol-screen-pinmux。USB-CAN 不使用这些 GPIO。接口身份以驱动、设备路径和 /proc/pcan 为准。"
   }
 }
