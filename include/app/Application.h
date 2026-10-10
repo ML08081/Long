@@ -21,6 +21,7 @@
 namespace patrol {
 
 struct AppConfig {
+    std::string runtimeSpeedPath; // separate atomic setting; preserve deployment JSON
     std::string device   = "/dev/video0";
     int         width    = 1280;
     int         height   = 720;

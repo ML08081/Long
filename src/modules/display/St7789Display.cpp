@@ -352,9 +352,9 @@ void St7789Display::showSensorPage(const net::SensorData& s) {
     clear(BG);
     titleBar("巡检状态");
 
-    // 链路是否新鲜：fault=1 表示 F4 遥测超时(>1s 无帧)。此时 F4 来的实时量一律显示 "无"，
-    // 绝不把上一帧旧值当实时显示（根治"掉线后数据被冻结"的误导）；标题右侧加离线角标。
-    const bool stale = (s.fault != 0);
+    // 链路是否新鲜：fault=1 表示 F4 遥测超时(>1s 无帧)。暂停后仍保留最近有效数值，
+    // 保留最近有效数值并加 *，来源离线仍明确显示状态。
+    const bool stale = (s.fault & 7U) != 0;
     if (stale) drawU8(cfg_.width - 8 - 2*16, 6, "离线", RED, CYAN);
 
     // 6 行放大留白：pitch 30，起始 48，铺满到风险块上沿
@@ -364,32 +364,32 @@ void St7789Display::showSensorPage(const net::SensorData& s) {
     { int x = rowLabel(y,"模式", CYAN);
       drawU8(x,y, modeZh[s.mode & 0x03], CYAN, BG); } y += pitch;
     { int x = rowLabel(y,"距离");
-      if (!stale && s.distance_cm) {
-          std::snprintf(v,sizeof v,"%u", s.distance_cm);
+      if (s.distance_cm) {
+          std::snprintf(v,sizeof v,"%u%s", s.distance_cm, (s.fault & 1U)?"*":"");
           int xv = drawU8(x,y, v, WHITE, BG);
           drawU8(xv+4,y, "厘米", WHITE, BG);
       } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
     { int x = rowLabel(y,"激光");
-      if (!stale && s.laser_cm) {
-          std::snprintf(v,sizeof v,"%u", s.laser_cm);
+      if (s.laser_cm) {
+          std::snprintf(v,sizeof v,"%u%s", s.laser_cm, (s.flags & net::SF_VL53_OK)?"":"*");
           int xv = drawU8(x,y, v, WHITE, BG);
           drawU8(xv+4,y, "厘米", WHITE, BG);
       } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
     { int x = rowLabel(y,"气体");
-      if (!stale) {
-          std::snprintf(v,sizeof v,"%u", s.gas_ppm);
+      if (!(s.fault & 2U) || (s.fault & net::FAULT_ENV_HELD)) {
+          std::snprintf(v,sizeof v,"%u%s", s.gas_ppm, (s.fault & 2U)?"*":"");
           drawU8(x,y, v, (s.flags & net::SF_GAS_ALARM) ? RED : WHITE, BG);
       } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
-    // 温湿度：DHT 有效位未置位说明 F4 侧传感器无读数，显示"无"而非旧值，避免误判为实时
+    // 温湿度停采时保留最后有效数值，用 * 标明并非实时。
     { int x = rowLabel(y,"温度");
-      if (!stale && (s.flags & net::SF_DHT_OK)) {
-          std::snprintf(v,sizeof v,"%d", s.temperature_01c/10);
+      if ((s.flags & net::SF_DHT_OK) || (s.fault & net::FAULT_DHT_HELD)) {
+          std::snprintf(v,sizeof v,"%d%s", s.temperature_01c/10, (s.flags & net::SF_DHT_OK)?"":"*");
           int xv = drawU8(x,y, v, WHITE, BG);
           drawU8(xv+4,y, "度", WHITE, BG);
       } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
     { int x = rowLabel(y,"湿度");
-      if (!stale && (s.flags & net::SF_DHT_OK)) {
-          std::snprintf(v,sizeof v,"%u %%", s.humidity_01/10);
+      if ((s.flags & net::SF_DHT_OK) || (s.fault & net::FAULT_DHT_HELD)) {
+          std::snprintf(v,sizeof v,"%u %%%s", s.humidity_01/10, (s.flags & net::SF_DHT_OK)?"":"*");
           drawU8(x,y, v, WHITE, BG);
       } else drawU8(x,y, "无", GRAY, BG); } y += pitch;
 
@@ -460,7 +460,7 @@ void St7789Display::showRelayPage(const RelayInfo& r, int subpage) {
     // 热成像
     { int x = rowLabel(y,"热成像"); std::snprintf(v,sizeof v,"%u 帧", r.thermalCnt);
       x = drawU8(x,y, v, WHITE, BG);
-      if (r.thermalMaxC10 > -1000) { std::snprintf(v,sizeof v," %d 度", r.thermalMaxC10/10);
+      if (r.thermalMaxC10 > -1000) { std::snprintf(v,sizeof v," %d 度%s", r.thermalMaxC10/10, r.thermalFresh?"":"*");
         drawU8(x,y, v, r.hotspot?RED:WHITE, BG); } } y += pitch;
     // 视觉
     { int x = rowLabel(y,"视觉");
@@ -494,17 +494,18 @@ void St7789Display::showCompactSensorPage(const net::SensorData& s) {
     static const char* modes[] = {"遥控","循迹","避障","巡检"};
     static const char* risks[] = {"SAFE","NOTE","WARN","DANGER"};
     const uint16_t colors[] = {green,cyan,yellow,red};
-    const bool stale = s.fault != 0;
-    const bool dht = !stale && (s.flags & net::SF_DHT_OK);
+    const bool stale = (s.fault & 7U) != 0;
+    const bool dht = (s.flags & net::SF_DHT_OK) || (s.fault & net::FAULT_DHT_HELD);
+    const std::string dhtMark=(s.flags & net::SF_DHT_OK)?"":"*";
     clear(0);
     compactTitle("巡检状态", "1/4");
     compactRow(22, "模式", stale ? "离线" : modes[s.mode & 3], stale ? red : cyan);
-    compactRow(40, "距离", !stale && s.distance_cm ? std::to_string(s.distance_cm)+"cm" : "无", white);
-    compactRow(58, "激光", !stale && s.laser_cm ? std::to_string(s.laser_cm)+"cm" : "无", white);
-    compactRow(76, "气体", stale ? "无" : std::to_string(s.gas_ppm),
+    compactRow(40, "距离", s.distance_cm ? std::to_string(s.distance_cm)+"cm"+((s.fault&1U)?"*":"") : "无", white);
+    compactRow(58, "激光", s.laser_cm ? std::to_string(s.laser_cm)+"cm"+((s.flags&net::SF_VL53_OK)?"":"*") : "无", white);
+    compactRow(76, "气体", ((s.fault&2U) && !(s.fault&net::FAULT_ENV_HELD)) ? "无" : std::to_string(s.gas_ppm)+((s.fault&2U)?"*":""),
                !stale && (s.flags & net::SF_GAS_ALARM) ? red : white);
-    compactRow(94, "温度", dht ? std::to_string(s.temperature_01c/10)+"C" : "无", dht ? white : gray);
-    compactRow(112,"湿度", dht ? std::to_string(s.humidity_01/10)+"%" : "无", dht ? white : gray);
+    compactRow(94, "温度", dht ? std::to_string(s.temperature_01c/10)+"C"+dhtMark : "无", dht ? white : gray);
+    compactRow(112,"湿度", dht ? std::to_string(s.humidity_01/10)+"%"+dhtMark : "无", dht ? white : gray);
     const uint16_t riskBg = stale ? gray : colors[s.risk_level & 3];
     fillRect(0, 130, 128, 30, riskBg);
     drawText(4, 133, stale ? "NO LINK" : std::string("RISK ")+risks[s.risk_level & 3], 0, riskBg, 1);
@@ -539,7 +540,7 @@ void St7789Display::showCompactRelayPage(const RelayInfo& r, int subpage) {
         compactRow(68, "环境", std::to_string(r.envCnt), r.envFresh ? green : white);
         drawU8(2, 92, "热成像", cyan, 0);
         drawU8(2, 112, std::to_string(r.thermalCnt)+"帧", white, 0);
-        compactRow(136, "温度", r.thermalMaxC10 > -1000 ? std::to_string(r.thermalMaxC10/10)+"C" : "无",
+        compactRow(136, "温度", r.thermalMaxC10 > -1000 ? std::to_string(r.thermalMaxC10/10)+"C"+(r.thermalFresh?"":"*") : "无",
                    r.hotspot ? red : white);
     } else {
         compactTitle("视觉状态", "4/4");

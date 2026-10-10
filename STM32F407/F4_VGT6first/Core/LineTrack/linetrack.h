@@ -31,17 +31,20 @@ extern "C" {
  *  ★ 切换本开关必须【同时】改接线与 CubeMX 配置，只改宏是不生效的。 */
 #define LINETRACK_USE_ADC   1
 
+/* 一次实际采样间隔；多个任务重复读取不会加快去抖。 */
+#define LINE_SAMPLE_MS      5U
+
 #if LINETRACK_USE_ADC
 
 /* ===== 模拟量阈值（12 位 ADC，量程 0~4095）===================================
- *  ★ 必须现场标定后再改这两个值，下面只是初始占位。
+ *  默认使用下方独立范围学习；手动回退阈值必须先取得现场两点读数。
  *
  *  标定步骤（烧录后看 F4 串口日志 COM26 @115200 的 [LINE_ADC] 行）：
  *    1. 小车放【白底】上，记三路读数 —— 这是"离线"基线
  *    2. 小车放【黑线】上，记三路读数 —— 这是"压线"基线
  *    3. 取两者之间留出迟滞带：
- *         LINE_ADC_ON_TH  ≈ 偏黑线一侧的 40% 分位（严格判压线，抗误报）
- *         LINE_ADC_OFF_TH ≈ 偏白底一侧的 60% 分位（宽松判离线，不漏丢线保护）
+ *         LINE_ADC_ON_TH  = 底色 + (线路-底色) × 60%（偏线路侧，严格判压线）
+ *         LINE_ADC_OFF_TH = 底色 + (线路-底色) × 40%（偏底色侧，及时判离线）
  *    4. 两个阈值之间就是死区，读数在死区内时保持上一状态不变 —— 抗抖动核心
  *
  *  极性说明：TCRT5000 常见接法是【黑线(反射弱) → AO 电压高 → ADC 值大】。
@@ -49,14 +52,25 @@ extern "C" {
  *  不要去交换上面两个阈值的大小关系。 */
 #define LINE_ADC_INVERTED    0        /* 0=压线时 ADC 值更大；1=压线时 ADC 值更小 */
 
+/* 默认按每路自身观察到的黑/白范围标定；停车后手动横扫线路，确保每个
+ * 探头都经过底色和线路。未获得足够对比度时不判压线，巡检保持停车。
+ * 只扩展范围、不遗忘已见过的底色，避免长时间丢线后把底色重新当成线。
+ * 有现场两点读数时调用 LineTrack_SetCalibration，可固定三路标定与极性。
+ * AUTO=0 时才使用下方手动阈值；不能把占位值当作已完成现场标定。 */
+#define LINE_ADC_AUTO_CALIBRATE 1
+#define LINE_ADC_MIN_SPAN       400U
+#define LINE_ADC_ENDPOINT_N     3U
+#define LINE_ADC_ENDPOINT_MARGIN 20U
+
 /* ★ 每路【独立】阈值。
- *   三个探头的读数离散很大（实测同一表面上 L=2790 / C=1065 / R=2140），
+ *   旧日志有 L=2790 / C=1065 / R=2140；缺少对应的黑/白两组表面说明，
+ *   不能仅按这一组数值直接填写六个阈值。三个探头的读数可能离散很大，
  *   来源是元件离散、LED 驱动电流差异、以及各探头实际离地高度的微小不同。
  *   用一套全局阈值必然顾此失彼 —— 这正是"一落地就全亮"的直接原因：
  *   全局阈值对读数偏高的那一路来说太低，白底也被判成黑线。
  *   模拟量方案的价值就在这里：每路单独标定即可，数字量时代没这个选项。
  *
- *   ⚠️ 下面是占位值，必须按 §标定流程 实测后替换。 */
+ *   下面仅为 AUTO=0 的手动回退占位值；默认 AUTO=1 不用它们判线。 */
 #define LINE_ADC_ON_TH_L   2500U      /* 左：判定压线 */
 #define LINE_ADC_OFF_TH_L  1800U      /* 左：判定离线（必须 < ON） */
 #define LINE_ADC_ON_TH_C   2500U      /* 中 */
@@ -70,6 +84,9 @@ extern "C" {
 
 /* 取最近一次三路 ADC 原始读数，供标定日志打印使用 */
 void LineTrack_GetRaw(uint16_t *l, uint16_t *c, uint16_t *r);
+uint8_t LineTrack_SetCalibration(const uint16_t background[3], const uint16_t line[3]);
+/* 阈值使用极性统一后的坐标（高值=线路）；反向通道需用4095-原始值比较。 */
+void LineTrack_GetThresholds(uint16_t off[3], uint16_t on[3], uint8_t *readyMask);
 
 #else  /* 数字量 DO 回退路径 */
 
@@ -91,7 +108,8 @@ typedef struct { uint8_t l, c, r; } LineState;   /* 1=该探头压在黑线上 *
 #define LINE_BIT_LOST      0x10u   /* 三路全脱线 = 丢线 */
 
 void      LineTrack_Init(void);            /* 清去抖状态 */
-LineState LineTrack_Read(void);            /* 带去抖的读取（每次调用采样一次，需周期调用） */
+LineState LineTrack_Read(void);            /* 固定5ms采样、滤波/迟滞；重复读取返回同一状态 */
+uint8_t   LineTrack_IsCalibrated(void);     /* 三路均有足够黑/白对比度 */
 uint8_t   LineTrack_IsJunction(LineState s);/* 三路全压线 */
 uint8_t   LineTrack_IsLost(LineState s);   /* 三路全脱线 */
 int8_t    LineTrack_Error(LineState s);    /* 线位置误差: -2..+2（负=线偏左，需向左修） */

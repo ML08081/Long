@@ -1,3 +1,4 @@
+#include <QDateTime>
 #include "netclient.h"
 #include <QtEndian>
 #include <QNetworkProxy>
@@ -148,6 +149,11 @@ bool NetClient::sendRaw(const QByteArray &data)
 
 bool NetClient::sendCommand(quint8 cmdId, quint8 value)
 {
+    /* 模式命令是遥控帧闸门的唯一开关。非手动模式下，即使手柄定时器仍有
+       一拍旧事件，也不能再用 FRAME_DRIVE 把龙芯/F4 抢回手动模式。 */
+    if (cmdId == LL::CMD_MODE)
+        m_driveEnabled = ((value & 0x03U) == 0U);
+
     QByteArray payload;
     payload.append(char(cmdId));
     payload.append(char(value));
@@ -167,9 +173,27 @@ bool NetClient::sendCommand(quint8 cmdId, quint8 value)
     return ok;
 }
 
+bool NetClient::requestThermal(int value)
+{
+    if(value<0 || value>2 || !sendCommand(LL::CMD_THERMAL,quint8(value))) return false;
+    m_pendingThermal=value; m_thermalRequestMs=QDateTime::currentMSecsSinceEpoch(); return true;
+}
+
+bool NetClient::requestSpeed(int value)
+{
+    if(value<100 || value>2000 || (value-100)%100) return false;
+    if(!sendCommand(LL::CMD_SPEED,quint8((value-100)/100))) return false;
+    m_pendingSpeed=value; m_speedRequestMs=QDateTime::currentMSecsSinceEpoch();
+    m_speedLimit=value; emit speedLimitChanged(value); return true;
+}
+
 bool NetClient::sendDrive(qint16 speed, qint16 steering)
 {
-    // payload：speed i16 LE + steering i16 LE（龙芯据此切 MANUAL 并转发同步命令给 F4）
+    speed=qBound(qint16(-m_speedLimit),speed,qint16(m_speedLimit));
+    steering=qBound(qint16(-1000),steering,qint16(1000));
+    if (!m_driveEnabled) return false;
+
+    // payload：speed i16 LE + steering i16 LE（仅手动模式由龙芯转发给 F4）
     QByteArray payload;
     uchar le[4];
     qToLittleEndian<qint16>(speed,    le);
@@ -227,6 +251,7 @@ void NetClient::onConnected()
 
 void NetClient::onDisconnected()
 {
+    m_pendingSpeed=0; m_pendingThermal=-1;
     m_buf.clear();
     // 建链后被动断开才提示；连接阶段的失败由 scheduleRetryOrFail 处理
     if (!m_connecting) {
@@ -293,6 +318,20 @@ void NetClient::parseBuffer()
 void NetClient::dispatch(quint8 type, const QByteArray &payload)
 {
     switch (type) {
+    case LL::FRAME_DEVICE_STATUS: {
+        if(payload.size()!=27 || quint8(payload[0])!=1 || quint8(payload[1])>1 ||
+           quint8(payload[2])>2 || quint8(payload[3])>19 ||
+           (quint8(payload[1]) && (quint8(payload[4])!=4 || quint8(payload[5])>3 || quint8(payload[6])>2 || quint8(payload[10])>19))) break;
+        QByteArray status=payload;
+        qint64 now=QDateTime::currentMSecsSinceEpoch();
+        if(m_pendingSpeed && (100+100*quint8(payload[3])==m_pendingSpeed || now-m_speedRequestMs>3000)) m_pendingSpeed=0;
+        if(m_pendingSpeed) status[3]=char((m_pendingSpeed-100)/100);
+        if(m_pendingThermal>=0 && (quint8(payload[2])==m_pendingThermal || now-m_thermalRequestMs>3000)) m_pendingThermal=-1;
+        if(m_pendingThermal>=0) status[2]=char(m_pendingThermal);
+        int requested=100+100*quint8(status[3]);
+        if(requested!=m_speedLimit) { m_speedLimit=requested; emit speedLimitChanged(requested); }
+        emit deviceStatus(status); break;
+    }
     case LL::FRAME_SENSOR:
         parseSensor(payload);
         break;
@@ -344,6 +383,9 @@ void NetClient::parseSensor(const QByteArray &payload)
     s.servo_us        = rdU16();
     s.voltage_mV      = rdU16();
     s.mode            = rdU8();
+    /* 看到真实设备已在自主模式时只做单向关断；重新允许遥控必须由用户
+       显式发送 MODE=0，避免延迟遥测把闸门意外打开。 */
+    if ((s.mode & 0x03U) != 0U) m_driveEnabled = false;
     s.fault           = rdU8();
     s.risk_level      = rdU8();
     s.flags           = rdU8();

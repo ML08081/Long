@@ -101,6 +101,13 @@ bool CanManager::reopen() {
 }
 
 // ---- 底层发送 -----------------------------------------------------------
+bool CanManager::sendRuntime(uint8_t preview,uint8_t flags,uint8_t gear,uint8_t seq,bool ee,uint8_t sampleSeq) {
+    uint8_t thermal[8]={5,preview,flags,seq,static_cast<uint8_t>(ee),sampleSeq,0,0};
+    uint8_t speed[3]={6,gear,seq};
+    bool a=sendRaw(can_proto::COBID_PATROL_RX,thermal,8);
+    return sendRaw(can_proto::COBID_PATROL_RX,speed,3) && a;
+}
+
 bool CanManager::sendRaw(uint32_t cobId, const uint8_t* d, uint8_t len) {
     if (fd_ < 0) return false;
     if (len > 8) len = 8;
@@ -117,17 +124,19 @@ bool CanManager::sendRaw(uint32_t cobId, const uint8_t* d, uint8_t len) {
     return true;
 }
 
-bool CanManager::sendCommand(int16_t speed, int16_t steering, uint8_t mode) {
-    speed    = std::max<int16_t>(-1000, std::min<int16_t>(1000, speed));
+bool CanManager::sendCommand(int16_t speed, int16_t steering, uint8_t mode,
+                             uint8_t visionAlarm) {
+    speed    = std::max<int16_t>(-2000, std::min<int16_t>(2000, speed));
     steering = std::max<int16_t>(-1000, std::min<int16_t>(1000, steering));
-    // 载荷大端（与 F4 can_link 一致）：spd i16, str i16, mode u8
-    uint8_t p[5];
+    // 载荷大端（与 F4 can_link 一致）：spd i16, str i16, mode u8, visionAlarm u8
+    uint8_t p[6];
     p[0] = static_cast<uint8_t>((static_cast<uint16_t>(speed)    >> 8) & 0xFF);
     p[1] = static_cast<uint8_t>( static_cast<uint16_t>(speed)          & 0xFF);
     p[2] = static_cast<uint8_t>((static_cast<uint16_t>(steering) >> 8) & 0xFF);
     p[3] = static_cast<uint8_t>( static_cast<uint16_t>(steering)       & 0xFF);
     p[4] = static_cast<uint8_t>(mode & 0x03);
-    return sendRaw(can_proto::COBID_CMD, p, 5);
+    p[5] = static_cast<uint8_t>(std::min<uint8_t>(visionAlarm, 2));
+    return sendRaw(can_proto::COBID_CMD, p, 6);
 }
 
 bool CanManager::sendPatrolCmd(uint8_t cmd, uint8_t flags) {
@@ -188,7 +197,11 @@ void CanManager::dispatch(uint32_t cobId, const uint8_t* d, uint8_t dlc) {
         case can_proto::COBID_EVT: {                // 0x481: byte0=sub_id 复用
             if (dlc < 1) break;
             uint8_t sub = d[0];
-            if (sub == can_proto::SUB_PATROL_EVT && dlc >= 4) {
+            if ((sub == 4 || sub == 5) && dlc == 8) {
+                if (runtimeCb_) runtimeCb_(d,8);
+            } else if ((sub == 6 || sub == 7) && dlc == 8) {
+                if (motionCb_) motionCb_(d,8);
+            } else if (sub == can_proto::SUB_PATROL_EVT && dlc >= 4) {
                 can_proto::PatrolEvent ev;
                 ev.event = d[1]; ev.pointSeq = d[2]; ev.state = d[3];
                 if (patrolEvtCb_) patrolEvtCb_(ev);

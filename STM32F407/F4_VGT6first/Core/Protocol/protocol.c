@@ -30,6 +30,7 @@ uint8_t Protocol_UnpackCommandFrame(const uint8_t* frame, ControlData* data)
 
     /* 拒绝遥测帧（bit7=1）：可能是 USART3 TX 经 BT 模块回环 */
     if (frame[5] & TELEMETRY_FLAG) return 0;
+    if (frame[5] > 3U) return 0;
 
     uint8_t checksum = Protocol_CalculateChecksum(frame, 6);
     if (checksum != frame[6]) return 0;

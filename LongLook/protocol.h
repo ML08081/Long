@@ -23,7 +23,8 @@ constexpr int     HEADER_SIZE = 6;                    // SOF(1)+TYPE(1)+LEN(4)
 constexpr quint32 MAX_PAYLOAD = 16u * 1024u * 1024u;
 
 enum FrameType : quint8 {
-    FRAME_SENSOR  = 0x01,   // 综合传感器遥测（见 SensorData，小端，变长容忍）
+    FRAME_SENSOR  = 0x01,
+    FRAME_DEVICE_STATUS = 0x02,   // 综合传感器遥测（见 SensorData，小端，变长容忍）
     FRAME_VIDEO   = 0x10,   // 视频帧：JPEG/PNG 编码字节流
     FRAME_THERMAL = 0x20,   // 热成像帧：uint16 w,h + w*h 个 int16 温度(0.01°C)
     FRAME_TEXT    = 0x30,   // 文本/日志：UTF-8
@@ -41,6 +42,7 @@ enum FrameType : quint8 {
 enum VisionFlag : quint8 {
     VIS_PERSON = 0x01,   // 检测到人
     VIS_FIRE   = 0x02,   // 检测到火焰/火源
+    VIS_SMOKE  = 0x04,   // 检测到烟雾
 };
 
 // 下行命令 ID（执行与联动模块控制）
@@ -50,7 +52,9 @@ enum CmdId : quint8 {
     CMD_RELAY  = 0x03,   // 继电器 value: 0断/1通
     CMD_LED    = 0x04,   // LED    value: 0灭/1亮
     CMD_MODE   = 0x05,   // 模式   value: 0手动/1自动/2避障/3巡检
-    CMD_ESTOP  = 0x06,   // 急停   value: 1
+    CMD_ESTOP  = 0x06,
+    CMD_THERMAL = 0x07, // AUTO/ON/OFF; alarm priority
+    CMD_SPEED = 0x08,   // gear 0..19 -> 100..2000
 };
 
 /*
@@ -78,6 +82,12 @@ enum CmdId : quint8 {
  *  39    1  led                联动   LED 状态
  */
 constexpr int SENSOR_PAYLOAD_SIZE = 42;   // v3：末尾追加 laser_cm(2B)，变长容忍
+
+// Cached numeric values remain present while their live validity flags are clear.
+enum SensorFault : quint8 {
+    FAULT_CORE_STALE=1, FAULT_ENV_STALE=2, FAULT_RUNTIME_STALE=4,
+    FAULT_DHT_HELD=8, FAULT_LASER_HELD=16, FAULT_ENV_HELD=32, FAULT_MOTION=64, FAULT_LINE_CALIBRATION=128
+};
 
 struct SensorData {
     quint32 timestamp_ms    = 0;

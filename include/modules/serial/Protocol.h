@@ -11,7 +11,7 @@
 //
 //  命令帧（龙芯 -> F4），定长 7 字节，大端序：
 //    [0]=0xAA [1]=spd_hi [2]=spd_lo [3]=str_hi [4]=str_lo [5]=mode(bit7=0) [6]=XOR(0..5)
-//    speed/steering : int16, -1000~+1000（speed +前进/-后退；steering +右/-左）
+//    speed : int16, -2000~+2000; steering : -1000~+1000（speed +前进/-后退；steering +右/-左）
 //    mode           : 0=Manual 1=Auto 2=Obstacle 3=Cruise
 //
 //  遥测帧（F4 -> 龙芯）：
@@ -126,11 +126,11 @@ inline uint8_t xorChecksum(const uint8_t* data, size_t len) {
     return c;
 }
 
-// 打包命令帧（7 字节）。速度/转向自动限幅到 [-1000,1000]。
+// 打包命令帧（7 字节）。速度限幅到 [-2000,2000]，转向限幅到 [-1000,1000]。
 inline std::array<uint8_t, CMD_FRAME_LEN>
 buildCommand(int16_t speed, int16_t steering, uint8_t mode) {
-    if (speed > 1000)      speed = 1000;
-    else if (speed < -1000) speed = -1000;
+    if (speed > 2000)      speed = 2000;
+    else if (speed < -2000) speed = -2000;
     if (steering > 1000)      steering = 1000;
     else if (steering < -1000) steering = -1000;
 

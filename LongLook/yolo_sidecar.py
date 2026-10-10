@@ -21,6 +21,7 @@ import io
 import json
 import struct
 import argparse
+import time
 
 # Windows 中文控制台默认 GBK，直接 print 会让上位机按 UTF-8 解码成乱码。
 # 统一把 stdout/stderr 重配为 UTF-8。
@@ -51,6 +52,8 @@ def main():
     ap.add_argument("--model", default="best.pt", help="YOLO 权重路径")
     ap.add_argument("--conf", type=float, default=0.35, help="置信度阈值")
     ap.add_argument("--imgsz", type=int, default=640, help="推理输入尺寸")
+    ap.add_argument("--fire-conf", type=float, default=0.25, help="火焰分类阈值")
+    ap.add_argument("--smoke-conf", type=float, default=0.50, help="烟雾分类阈值")
     args = ap.parse_args()
 
     try:
@@ -75,6 +78,8 @@ def main():
 
     stdin = sys.stdin.buffer
     out = sys.stdout
+    out.write(json.dumps({"ready": True, "classes": list(names.values())}) + "\n")
+    out.flush()
 
     while True:
         hdr = read_exact(stdin, 4)
@@ -88,6 +93,7 @@ def main():
             break
 
         dets = []
+        started = time.perf_counter()
         try:
             arr = np.frombuffer(data, dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -102,8 +108,14 @@ def main():
                             x1, y1, x2, y2 = xyxy
                             cls_id = int(b.cls[0].item())
                             conf = float(b.conf[0].item())
+                            cls_name = str(names.get(cls_id, cls_id))
+                            normalized = cls_name.lower()
+                            if ("fire" in normalized or "flame" in normalized) and conf < args.fire_conf:
+                                continue
+                            if "smoke" in normalized and conf < args.smoke_conf:
+                                continue
                             dets.append({
-                                "cls": str(names.get(cls_id, cls_id)),
+                                "cls": cls_name,
                                 "conf": round(conf, 3),
                                 "x": int(x1), "y": int(y1),
                                 "w": int(x2 - x1), "h": int(y2 - y1),
@@ -111,7 +123,8 @@ def main():
         except Exception as e:
             log("推理异常: %s" % e)
 
-        out.write(json.dumps({"dets": dets}) + "\n")
+        infer_ms = round((time.perf_counter() - started) * 1000.0, 1)
+        out.write(json.dumps({"dets": dets, "infer_ms": infer_ms}) + "\n")
         out.flush()
 
 

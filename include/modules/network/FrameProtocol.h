@@ -28,7 +28,8 @@ constexpr uint32_t LL_MAX_PAYLOAD = 16u * 1024u * 1024u;   // 16 MiB 上限
 
 // 帧类型
 enum FrameType : uint8_t {
-    FRAME_SENSOR  = 0x01,   // 龙芯→前端 综合传感器遥测（40 字节，小端，变长容忍）
+    FRAME_SENSOR  = 0x01,
+    FRAME_DEVICE_STATUS = 0x02,   // 龙芯→前端 综合传感器遥测（40 字节，小端，变长容忍）
     FRAME_VIDEO   = 0x10,   // 龙芯→前端 视频帧：JPEG/PNG 编码字节流
     FRAME_THERMAL = 0x20,   // 龙芯→前端 热成像帧：uint16 w,h + w*h 个 int16 温度(0.01°C)
     FRAME_TEXT    = 0x30,   // 龙芯→前端 文本/日志：UTF-8
@@ -48,6 +49,7 @@ enum FrameType : uint8_t {
 enum VisionFlag : uint8_t {
     VIS_PERSON = 0x01,   // 检测到人
     VIS_FIRE   = 0x02,   // 检测到火焰/火源
+    VIS_SMOKE  = 0x04,   // 检测到烟雾
 };
 
 // 下行命令 ID（执行与联动模块控制）
@@ -57,7 +59,9 @@ enum CmdId : uint8_t {
     CMD_RELAY  = 0x03,   // 继电器 value: 0断/1通
     CMD_LED    = 0x04,   // LED    value: 0灭/1亮
     CMD_MODE   = 0x05,   // 模式   value: 0手动/1自动/2避障/3巡检
-    CMD_ESTOP  = 0x06,   // 急停   value: 1
+    CMD_ESTOP  = 0x06,
+    CMD_THERMAL = 0x07, // 0 AUTO, 1 ON, 2 OFF; alarms override OFF
+    CMD_SPEED = 0x08,   // gear 0..19 => 100..2000, step 100
 };
 
 // v2 基础负载 40 字节；v3 在其后追加激光测距(2B)，共 42 字节。
@@ -66,6 +70,12 @@ constexpr int LL_SENSOR_PAYLOAD_SIZE_V2 = 40;
 constexpr int LL_SENSOR_PAYLOAD_SIZE    = 42;
 
 // SensorData.flags 位定义（与 F4 环境帧 ENV_FLAG_* / serial_proto 一一对应）
+// Cached numeric values remain present while their live validity flags are clear.
+enum SensorFault : uint8_t {
+    FAULT_CORE_STALE=1, FAULT_ENV_STALE=2, FAULT_RUNTIME_STALE=4,
+    FAULT_DHT_HELD=8, FAULT_LASER_HELD=16, FAULT_ENV_HELD=32, FAULT_MOTION=64, FAULT_LINE_CALIBRATION=128
+};
+
 enum SensorFlag : uint8_t {
     SF_GAS_ALARM = 0x01,   // 气体浓度超阈
     SF_FLAME     = 0x02,   // 火焰检测
@@ -178,7 +188,7 @@ struct Command {
 
 // 解析出的手动驱动命令（FRAME_DRIVE）
 struct DriveCommand {
-    int16_t speed    = 0;   // -1000~+1000
+    int16_t speed    = 0;   // -2000~+2000
     int16_t steering = 0;   // -1000~+1000
 };
 

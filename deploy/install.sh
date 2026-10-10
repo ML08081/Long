@@ -31,6 +31,9 @@ echo "==> [3/7] 安装可执行文件与脚本"
 install -m 755 "$HERE/patrol_system"            /usr/bin/patrol_system
 install -m 755 "$HERE/scripts/start.sh"         /usr/bin/patrol_start
 install -m 755 "$HERE/scripts/setup_network.sh" /usr/bin/patrol_setup_network
+install -m 755 "$HERE/scripts/dhcp_hook.sh"     /usr/bin/patrol_dhcp_hook
+install -m 755 "$HERE/scripts/wifi_link_action.sh" /usr/bin/patrol_wifi_link_action
+install -m 755 "$HERE/scripts/migrate_network.sh" /usr/bin/patrol_network_migrate
 install -m 755 "$HERE/scripts/health_check.sh"  /usr/bin/patrol_healthcheck
 
 echo "==> [4/7] 安装配置文件（已存在则保留，不覆盖）"
@@ -38,7 +41,9 @@ mkdir -p /etc/patrol
 [ -f /etc/patrol/config.json ]  && echo "    /etc/patrol/config.json 已存在，跳过" \
     || install -m 644 "$HERE/config/config.json" /etc/patrol/config.json
 [ -f /etc/patrol/network.conf ] && echo "    /etc/patrol/network.conf 已存在，跳过" \
-    || install -m 644 "$HERE/network.conf" /etc/patrol/network.conf
+    || install -m 600 "$HERE/network.conf" /etc/patrol/network.conf
+chmod 600 /etc/patrol/network.conf
+[ ! -f /etc/patrol/wifi-password ] || chmod 600 /etc/patrol/wifi-password
 
 echo "==> [5/7] 创建日志目录"
 mkdir -p /var/log/patrol
@@ -65,8 +70,11 @@ echo " WiFi连接日志: journalctl -u patrol-network -f"
 echo " 服务日志:     journalctl -u patrol -f"
 echo " 程序日志:     /var/log/patrol/patrol-v*.log"
 echo " 健康检测日志: /var/log/patrol/health.log"
-echo " WiFi/IP配置:  /etc/patrol/network.conf  (SSID=B410, 固定IP=192.168.3.100)"
+echo " WiFi/IP配置:  /etc/patrol/network.conf  (新模板: MLML, DHCP)"
 echo ""
-echo " 重启后自动: 连接WiFi(B410) -> 固定IP 192.168.3.100 -> 启动巡检服务。"
-echo " 上位机 LongLook 连接: 192.168.3.100:8080"
+echo " 旧网络配置不会被安装覆盖。切换手机热点请运行:"
+echo "   patrol_network_migrate stage --ssid MLML"
+echo "   (从终端/标准输入提供密码，300秒内在新地址执行 confirm，否则自动回退)"
+echo " 重启后自动: 连接WiFi -> DHCP地址 -> 启动巡检服务。"
+echo " 上位机 LongLook 在同一热点内通过 UDP :8083 自动发现，TCP :8080 连接。"
 echo "================================================"

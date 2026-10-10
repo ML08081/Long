@@ -23,6 +23,33 @@ VisionProcessor::VisionProcessor(QObject *parent) : QObject(parent)
     }
     if (m_scriptPath.isEmpty())
         m_scriptPath = "F:/projectForXN/NGFXM/LongLook/yolo_sidecar.py";
+
+    m_startWatchdog = new QTimer(this);
+    m_startWatchdog->setSingleShot(true);
+    connect(m_startWatchdog, &QTimer::timeout, this, [this] {
+        if (m_enabled && !m_ready) {
+            emit logMessage("视觉：模型加载超时，已停止边车");
+            m_enabled = false;
+            stop();
+        }
+    });
+
+    m_frameWatchdog = new QTimer(this);
+    m_frameWatchdog->setSingleShot(true);
+    connect(m_frameWatchdog, &QTimer::timeout, this, [this] {
+        if (!m_pending || !m_enabled) return;
+        emit logMessage("视觉：单帧推理超时，正在自动重启边车");
+        if (m_proc) {
+            m_proc->disconnect(this);
+            m_proc->kill();
+            m_proc->deleteLater();
+            m_proc = nullptr;
+        }
+        m_pending = false;
+        m_ready = false;
+        emit statusChanged(false);
+        start();
+    });
 }
 
 VisionProcessor::~VisionProcessor()
@@ -53,6 +80,12 @@ void VisionProcessor::start()
         emit statusChanged(false);
         return;
     }
+    if (!QFileInfo::exists(m_modelPath)) {
+        emit logMessage(QString("视觉：找不到模型 %1").arg(m_modelPath));
+        m_enabled = false;
+        emit statusChanged(false);
+        return;
+    }
 
     // 指定的解释器不存在（含路径分隔符却找不到）时，回退到系统 PATH 的 python，并给出提示。
     if (m_pythonExe.contains('/') && !QFileInfo::exists(m_pythonExe)) {
@@ -71,9 +104,13 @@ void VisionProcessor::start()
     QStringList args;
     args << m_scriptPath
          << "--model" << m_modelPath
-         << "--conf"  << QString::number(m_conf, 'f', 2);
+         << "--conf"  << QString::number(m_conf, 'f', 2)
+         << "--imgsz" << "416"
+         << "--fire-conf" << "0.25"
+         << "--smoke-conf" << "0.50";
 
     m_pending = false;
+    m_ready = false;
     m_stdoutBuf.clear();
     emit logMessage(QString("视觉：启动边车 %1 %2（模型 %3）")
                     .arg(m_pythonExe, m_scriptPath, m_modelPath));
@@ -85,11 +122,13 @@ void VisionProcessor::start()
         emit statusChanged(false);
         return;
     }
-    emit statusChanged(true);
+    m_startWatchdog->start(15000);
 }
 
 void VisionProcessor::stop()
 {
+    if (m_startWatchdog) m_startWatchdog->stop();
+    if (m_frameWatchdog) m_frameWatchdog->stop();
     if (m_proc) {
         m_proc->disconnect(this);
         if (m_proc->state() != QProcess::NotRunning) {
@@ -102,13 +141,14 @@ void VisionProcessor::stop()
         m_proc = nullptr;
     }
     m_pending = false;
+    m_ready = false;
     m_stdoutBuf.clear();
     emit statusChanged(false);
 }
 
 void VisionProcessor::submitFrame(const QImage &frame)
 {
-    if (!m_enabled || !isRunning()) return;
+    if (!m_enabled || !isRunning() || !m_ready) return;
     if (m_pending) return;                 // 背压：等上一帧结果回来再送
     if (frame.isNull()) return;
 
@@ -123,6 +163,7 @@ void VisionProcessor::submitFrame(const QImage &frame)
     if (m_proc->write(reinterpret_cast<const char *>(hdr), 4) != 4) return;
     if (m_proc->write(jpeg) != jpeg.size()) return;
     m_pending = true;
+    m_frameWatchdog->start(2500);
 }
 
 void VisionProcessor::onReadyReadStdout()
@@ -143,8 +184,18 @@ void VisionProcessor::parseLine(const QByteArray &line)
     if (err.error != QJsonParseError::NoError || !doc.isObject()) return;
 
     QJsonObject obj = doc.object();
+    if (obj.value("ready").toBool()) {
+        m_ready = true;
+        m_pending = false;
+        m_startWatchdog->stop();
+        emit logMessage(QString("视觉：模型已就绪（%1）")
+                        .arg(obj.value("classes").toVariant().toStringList().join(", ")));
+        emit statusChanged(true);
+        return;
+    }
     // 一帧结果回来 -> 解除背压，允许送下一帧
     m_pending = false;
+    m_frameWatchdog->stop();
 
     QVector<Detection> out;
     for (const QJsonValue &v : obj.value("dets").toArray()) {
@@ -178,6 +229,7 @@ void VisionProcessor::onProcessFinished(int code, QProcess::ExitStatus)
 {
     emit logMessage(QString("视觉：边车已退出 (code=%1)").arg(code));
     m_pending = false;
+    m_ready = false;
     if (m_enabled) {           // 非主动关闭却退出了 -> 复位开关，避免"以为在跑其实没跑"
         m_enabled = false;
         emit statusChanged(false);

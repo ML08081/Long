@@ -28,6 +28,7 @@
 #include "servo.h"
 #include "servo2.h"
 #include "motor.h"
+#include "motion_control.h"
 #include "encoder.h"
 #include "hc.h"
 #include "protocol.h"
@@ -45,6 +46,7 @@
 #include "vl53l0x.h"
 #include "linetrack.h"
 #include "patrol.h"
+#include "runtime_control.h"
 #include "watchdog.h"
 #include "i2c_recover.h"
 #include "pid.h"
@@ -109,18 +111,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/*
- * 遥控心跳超时 (Heartbeat Timeout)
- * ================================
- * MotionControlTask 每 17ms 运行一次。
- * 超时阈值 (单位：MotionControlTask 周期 = 17ms)：
- *   HB_ACTIVE   0~5    (~85ms)   正常控制
- *   HB_HOLD     6~30   (~510ms)  保持最后指令（容忍偶发丢帧）
- *   超过        →                安全停车
- */
-#define HB_ACTIVE_MAX     5    // 正常控制窗口 (~85ms)
-#define HB_HOLD_MAX      30    // 保持窗口 (~510ms)，之后安全停车
-#define BTDBG_POLL_TICKS   59  // 59 × 17ms ≈ 1 秒，诊断输出周期
+/* Heartbeat deadlines use elapsed RTOS milliseconds, not loop counts. */
+#define HB_ACTIVE_MAX 85U
+#define HB_HOLD_MAX 510U
 
 #ifndef THERMAL_TASK_ENABLED
 #define THERMAL_TASK_ENABLED 1     /* MLX90640 原始帧转发（USART1 专线） */
@@ -133,32 +126,7 @@
 #define LINK_USE_CAN 1
 #endif
 
-/* ===== 电机速度闭环 PID 默认参数 =====================================
- *  下列宏仅是【上电默认值】——运行时可经 0x60 PID 参数帧在线修改
- *  （LongLook 链路调试页 → 龙芯 → F4），调好后把最终值写回这里固化。
- *  MOTION_PID_DEFAULT_CLOSED: 0=开环直通(出厂默认) 1=上电即闭环
- *  MOTION_PID_MAX_DELTA: 全速(±1000)每 17ms 编码器脉冲增量，须实车标定
- *    （用调试页"开环 PWM=1000"测试读 meas 稳态值）。 */
-/* ★ 2026-07-21 台架实测整定完成（驱动轮悬空，编码器改脉冲+方向解码后）：
- *   系统增益 K ≈ 1.1 counts/(17ms·PWM单位)，来自开环标定 PWM=1000 -> 1098 counts。
- *   Kp=1.0：K·Kp≈1.1 接近单位增益，响应快且不超调（Kp=2.0 会超调 2.2 倍而震荡）。
- *   Ki=4.0：约 260ms 消除静差。实测 target=500 -> meas 稳定 495~504（静差 ≈ ±1%），
- *           左右轮高度对称，无超调。
- *   Kd=0  ：位置式 PID 已用 derivative-on-measurement，速度环加 D 只放大噪声。
- *   MaxDelta=1100：开环 PWM=1000 单轮满速实测 1098 counts/17ms。 */
-#define MOTION_PID_KP        1.0f
-#define MOTION_PID_KI        4.0f
-#define MOTION_PID_KD        0.0f
-#define MOTION_PID_MAX_DELTA 1100.0f  /* 实测标定值(原 300 为占位) */
-#define MOTION_PID_DT        0.017f   /* 控制周期(s)，与 osDelay(17) 一致 */
-/* ★ 2026-07-23：上电即闭环。
- *   开环直通给两个电机【相同 PWM】，但两侧电机/减速箱/轮胎摩擦不可能完全一致，
- *   实际转速必然有偏差 —— 表现为遥控直行时跑偏。而编码器虽然一直在读（dL/dR），
- *   开环分支下只用于遥测显示，等于摆设。
- *   置 1 后走常规闭环分支：命令速度映射为目标脉冲增量，由 PID 用编码器实测增量
- *   闭环校正各轮 PWM，两轮转速自动对齐，编码器真正进入控制回路。
- *   参数用上面 2026-07-21 台架整定并固化的值（静差 ≈ ±1%，无超调）。 */
-#define MOTION_PID_DEFAULT_CLOSED 1
+/* CPS controller parameters are defined in motion_control.c. */
 #define PID_TUNING_ENABLED   0
 
 /* USER CODE END PD */
@@ -199,6 +167,10 @@ static uint8_t dbg_rx_expect = FRAME_LENGTH;
 
 static void DebugUart_ProcessRxByte(uint8_t byte)
 {
+    static uint32_t lastByteMs=0;
+    uint32_t now=HAL_GetTick();
+    if(now-lastByteMs>50U) { dbg_rx_state=0; dbg_rx_idx=0; }
+    lastByteMs=now;
   switch (dbg_rx_state)
   {
   case DBG_RX_STATE_IDLE:
@@ -214,24 +186,20 @@ static void DebugUart_ProcessRxByte(uint8_t byte)
   case DBG_RX_STATE_RECV:
     if (dbg_rx_idx == 1U)
     {
-      if      (byte == FRAME_PIDPARAM_MARKER) dbg_rx_expect = FRAME_PIDPARAM_LENGTH;
+      if      (byte == 0x63U) dbg_rx_expect = 12U;
+      else if (byte == FRAME_PIDPARAM_MARKER) dbg_rx_expect = FRAME_PIDPARAM_LENGTH;
       else if (byte == FRAME_PIDTEST_MARKER)  dbg_rx_expect = FRAME_PIDTEST_LENGTH;
       else                                    dbg_rx_expect = FRAME_LENGTH;
     }
-    if (dbg_rx_expect == FRAME_LENGTH && byte == FRAME_HEADER && dbg_rx_idx < 6U)
-    {
-      dbg_rx_frame[0] = byte;
-      dbg_rx_idx = 1;
-      g_rx_header_err++;
-      break;
-    }
+/* A payload byte 0xAA is legal (e.g. speed=170); only inter-byte timeout resynchronizes. */
     dbg_rx_frame[dbg_rx_idx++] = byte;
     if (dbg_rx_idx >= dbg_rx_expect)
     {
       uint8_t raw[FRAME_PIDPARAM_LENGTH];
       for (uint8_t i = 0; i < dbg_rx_expect; ++i) raw[i] = dbg_rx_frame[i];
 
-      if (dbg_rx_expect == FRAME_PIDPARAM_LENGTH)
+      if (dbg_rx_expect == 12U) { Runtime_UartRequest(raw); }
+      else if (dbg_rx_expect == FRAME_PIDPARAM_LENGTH)
       {
 #if PID_TUNING_ENABLED
         if (Protocol_CalculateChecksum(raw, FRAME_PIDPARAM_LENGTH - 1U) == raw[FRAME_PIDPARAM_LENGTH - 1U] &&
@@ -312,15 +280,12 @@ volatile int16_t g_mot_speed      = 0;   /* 当前命令速度 */
 volatile int16_t g_mot_steer_tele = 0;   /* 舵机回读转向(-1000~1000) */
 volatile uint8_t g_mot_mode       = MODE_MANUAL;
 
-/* ---- 运行时 PID 参数/状态（MotionControlTask 独占写；tele 快照 volatile 供读） ---- */
-static PidParams g_pid = {
-  MOTION_PID_KP, MOTION_PID_KI, MOTION_PID_KD,
-  MOTION_PID_MAX_DELTA, MOTION_PID_DEFAULT_CLOSED
-};
-/* PID 遥测快照（TelemetryTask 打包 0x62 帧） */
-volatile uint8_t g_pt_flags = 0;   /* bit0=闭环 bit1=测试中 bit4-5=测试模式 */
+/* Read-only controller snapshot: Motor1=left/ENC2, Motor2=right/ENC1; CPS. */
+volatile uint8_t g_pt_flags = 0;   /* bit0=closed-loop, bit2=motion fault */
 volatile int16_t g_pt_targL = 0, g_pt_measL = 0, g_pt_outL = 0;
 volatile int16_t g_pt_targR = 0, g_pt_measR = 0, g_pt_outR = 0;
+volatile uint8_t g_motion_fault = 0;
+volatile uint32_t g_motion_dt_us = 17000;
 
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
@@ -334,7 +299,7 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t MotionControlTaHandle;
 const osThreadAttr_t MotionControlTa_attributes = {
   .name = "MotionControlTa",
-  .stack_size = 256 * 4,
+  .stack_size = 384 * 4,
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for ScanTask */
@@ -457,10 +422,11 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Infinite loop */
+  /* 独立蜂鸣器快速节拍：环境任务含 DHT11 阻塞读，不能承担报警节奏。 */
   for(;;)
   {
-    osDelay(1000);
+    Buzzer_Tick(20U);
+    osDelay(20U);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -488,7 +454,7 @@ void StartMotionControlTask(void *argument)
   uint8_t current_mode = MODE_MANUAL;
 
   // 心跳超时跟踪
-  uint32_t s_remote_age   = 0;
+  uint32_t s_remote_tick = 0;
   uint8_t  remote_active  = 0;           // 0=纯本地模式, 1=遥控已激活
 
   // 差速转向：保存从遥控帧中解析的原始转向值 (-1000~+1000)
@@ -507,21 +473,12 @@ void StartMotionControlTask(void *argument)
   uint8_t  sc_state = 0;
   uint8_t  sc_wait  = 0;
 
-  uint32_t dbg_tick = 0;
-  uint32_t bt_dbg_tick = 0;
+
+
+  MotionControl motion; Motion_Init(&motion);
+  uint32_t sampleCycles = 0, controlDeadline = osKernelGetTickCount();
+  uint8_t previousMode = MODE_MANUAL;
   int8_t   last_btn_cmd = 0;
-
-  // ---- 速度闭环 PID（运行时参数 g_pid，0x60 帧在线可调） ----
-  PID_t pid_left, pid_right;
-  PID_Init(&pid_left,  g_pid.kp, g_pid.ki, g_pid.kd, -MAX_SPEED, MAX_SPEED);
-  PID_Init(&pid_right, g_pid.kp, g_pid.ki, g_pid.kd, -MAX_SPEED, MAX_SPEED);
-  int32_t pid_prev_cnt1 = Encoder1_GetCount();
-  int32_t pid_prev_cnt2 = Encoder2_GetCount();
-
-  // ---- PID 测试激励状态（0x61 帧驱动；到时自动停，安全上限见 protocol.h） ----
-  uint8_t  test_mode   = PID_TEST_OFF;
-  int16_t  test_L = 0, test_R = 0;
-  uint32_t test_expire = 0;
 
   for(;;)
   {
@@ -581,115 +538,8 @@ void StartMotionControlTask(void *argument)
     DebugUart_PollRx();
     USART3_PollRx();
     USART3_EnsureRxActive();
-
-    // ===== 调试心跳（~3s）=====
-    dbg_tick++;
-    if (dbg_tick >= 176)
-    {
-      dbg_tick = 0;
-      LOG("DBG: rx_frms=%lu pid_frms=%lu err(crc=%lu,hdr=%lu) spd=%d steer=%d "
-          "L=%d R=%d age=%lu%s pid(closed=%u kp=%d.%03d maxD=%d) test=%u",
-          g_rx_frame_cnt, g_rx_pid_frame_cnt, g_rx_crc_err, g_rx_header_err,
-          current_speed, s_raw_steering,
-          s_last_left_spd, s_last_right_spd, s_remote_age,
-          (remote_active ? " BT" : " LOC"),
-          g_pid.closed_loop, (int)g_pid.kp, (int)(g_pid.kp*1000)%1000,
-          (int)g_pid.max_delta, test_mode);
-      /* 编码器实时核查：开环给正 PWM 时 c1/c2 应递增、dL/dR 应为正；
-         若某轮为负=该轮编码器相位反(CubeMX 交换该 TIM 两通道 Polarity)；
-         若恒为 0=该轮 A/B 未接或引脚错(TIM3 PA6/PB5, TIM4 PD12/PD13)。 */
-      LOG("[ENC] c1=%ld c2=%ld dL=%d dR=%d",
-          (long)Encoder1_GetCount(), (long)Encoder2_GetCount(),
-          Encoder1_GetDelta(), Encoder2_GetDelta());
-      /* 外部时钟模式：CNT 只增不减；DIR 电平决定符号。
-         判读：转轮子时 CNT 应单调递增；换向时 DIR 应翻转(0<->1)。 */
-      LOG("[ENC_RAW] TIM3_CNT=%u DIR1=%u | TIM4_CNT=%u DIR2=%u",
-          (unsigned)TIM3->CNT,
-          (unsigned)HAL_GPIO_ReadPin(ENC1_DIR_GPIO_Port, ENC1_DIR_Pin),
-          (unsigned)TIM4->CNT,
-          (unsigned)HAL_GPIO_ReadPin(ENC2_DIR_GPIO_Port, ENC2_DIR_Pin));
-      /* ★ PID 跟踪诊断（2026-07-23 加配重落地后加）：
-         targ=目标脉冲增量(由命令速度×MaxDelta映射)，meas=编码器实测增量，out=PWM。
-         判读：
-           · |out| 长期贴 1000 而 meas 远低于 targ  => 驱动能力不足(负载太重/供电电压太低)
-                                                      或 MaxDelta 标高了，PID 一直饱和 → 卡顿
-           · meas/targ 稳定在某个比值 k            => 把 MOTION_PID_MAX_DELTA 乘以 k 重标定
-           · meas 在 0 附近但 out 不小             => 死区未越过，抬高 MOTOR_MIN_DUTY */
-      LOG("[PIDTRK] L targ=%d meas=%d out=%d | R targ=%d meas=%d out=%d | closed=%u",
-          g_pt_targL, g_pt_measL, g_pt_outL,
-          g_pt_targR, g_pt_measR, g_pt_outR, g_pid.closed_loop);
-      /* CAN 链路活性判读：
-           rxcmd 涨 = 能收 0x201 命令        tx 涨 = 有帧投递进邮箱
-           tx≈drop  = 邮箱恒满 → 帧根本发不出去（对端没 ACK）
-           LEC      = ★最后错误码，直接指认物理层病因：
-                      ACK    → 没人回 ACK（对端没接/没上电/CANH-CANL 反/RS 未接地/无终端）
-                      BitRec/BitDom → 发的和读回的不一致（收发器坏/接线错/总线被拉死）
-                      Stuff/Form/CRC → 波特率或采样点不匹配
-           BOFF     = 当前是否处于 bus-off（ESR.BOFF 权威现态，非累积计数） */
-      LOG("[CAN] rxcmd=%lu rxoth=%lu tx=%lu drop=%lu err=%lu boff=%lu TEC=%lu REC=%lu LEC=%lu(%s) BOFF=%u",
-          g_can_rx_cmd_cnt, g_can_rx_other_cnt, g_can_tx_cnt, g_can_tx_drop,
-          g_can_err_cnt, g_can_busoff_cnt, CANLink_GetTEC(), CANLink_GetREC(),
-          CANLink_GetLEC(), CANLink_LECStr(), CANLink_IsBusOff());
-      LOG("[CAN_RECOVER] cnt=%lu", g_can_recover_cnt);
-    }
-    bt_dbg_tick++;
-    if (bt_dbg_tick >= BTDBG_POLL_TICKS)
-    {
-      bt_dbg_tick = 0;
-      BTDbg_Poll(remote_active, s_remote_age, (uint8_t)huart3.RxState);
-    }
-
-    // ===== 0.5 PID 在线参数 / 测试命令消费（ISR 写标志，本任务消费） =====
-    if (g_pid_param_ready)
-    {
-      taskENTER_CRITICAL();
-      PidParams np = g_pid_param_rx;
-      g_pid_param_ready = 0;
-      taskEXIT_CRITICAL();
-      g_pid = np;
-      PID_SetGains(&pid_left,  g_pid.kp, g_pid.ki, g_pid.kd);
-      PID_SetGains(&pid_right, g_pid.kp, g_pid.ki, g_pid.kd);
-      PID_Reset(&pid_left);            /* 换参清积分：阶跃响应可复现 */
-      PID_Reset(&pid_right);
-      LOG("[PID] param: kp=%d.%03d ki=%d.%03d kd=%d.%03d maxD=%d closed=%u",
-          (int)g_pid.kp, (int)(g_pid.kp*1000)%1000,
-          (int)g_pid.ki, (int)(g_pid.ki*1000)%1000,
-          (int)g_pid.kd, (int)(g_pid.kd*1000)%1000,
-          (int)g_pid.max_delta, g_pid.closed_loop);
-    }
-    if (g_pid_test_ready)
-    {
-      taskENTER_CRITICAL();
-      PidTestCmd tc = g_pid_test_rx;
-      g_pid_test_ready = 0;
-      taskEXIT_CRITICAL();
-      if (tc.mode == PID_TEST_OFF)
-      {
-        test_mode = PID_TEST_OFF;
-        PID_Reset(&pid_left); PID_Reset(&pid_right);
-        Motor1_Set(0); Motor2_Set(0);
-        LOG("[PID] test STOP");
-      }
-      else
-      {
-        test_mode   = tc.mode;
-        test_L      = tc.left;
-        test_R      = tc.right;
-        test_expire = osKernelGetTickCount() + tc.duration_ms;
-        PID_Reset(&pid_left); PID_Reset(&pid_right);
-        LOG("[PID] test start: mode=%u L=%d R=%d dur=%ums",
-            tc.mode, tc.left, tc.right, tc.duration_ms);
-      }
-    }
-    /* 测试到时自动停（安全）；链路断开也停 */
-    if (test_mode != PID_TEST_OFF &&
-        (osKernelGetTickCount() >= test_expire))
-    {
-      test_mode = PID_TEST_OFF;
-      PID_Reset(&pid_left); PID_Reset(&pid_right);
-      Motor1_Set(0); Motor2_Set(0);
-      LOG("[PID] test expired -> stop");
-    }
+    uint8_t operator_update = 0;
+    int16_t operator_speed = 0;
 
     // ===== 1. 遥控数据消费（优先级高于本地按键） =====
     if (g_remote_ready)
@@ -699,15 +549,17 @@ void StartMotionControlTask(void *argument)
       g_remote_ready = 0;
       taskEXIT_CRITICAL();
 
-      s_remote_age = 0;
+      s_remote_tick = osKernelGetTickCount();
       remote_active = 1;
 
       current_speed = remote.speed;
+      operator_speed = remote.speed;
+      operator_update = 1;
       current_mode  = remote.mode;
       s_raw_steering = remote.steering;
 
-      if (current_speed > MAX_SPEED)  current_speed = MAX_SPEED;
-      if (current_speed < -MAX_SPEED) current_speed = -MAX_SPEED;
+      if (current_speed > CONTROL_SPEED_MAX_LEVEL)  current_speed = CONTROL_SPEED_MAX_LEVEL;
+      if (current_speed < -CONTROL_SPEED_MAX_LEVEL) current_speed = -CONTROL_SPEED_MAX_LEVEL;
 
       int16_t target_angle = (int16_t)(-(int32_t)remote.steering * 90 / 1000);
       if (target_angle < SERVO_ANGLE_MIN) target_angle = SERVO_ANGLE_MIN;
@@ -721,15 +573,17 @@ void StartMotionControlTask(void *argument)
       uint8_t btn_backward = HAL_GPIO_ReadPin(BTN_BACK_GPIO_Port, BTN_BACK_Pin);
 
       int8_t btn_cmd;
-      if      (btn_forward == 1 && btn_backward == 0) { current_speed =  MOTOR_TEST_SPEED; btn_cmd = 1; }
-      else if (btn_backward == 1 && btn_forward == 0) { current_speed = -MOTOR_TEST_SPEED; btn_cmd = -1; }
+      if      (btn_forward == 1 && btn_backward == 0) { current_speed =  Runtime_Speed(); btn_cmd = 1; }
+      else if (btn_backward == 1 && btn_forward == 0) { current_speed = -(int16_t)Runtime_Speed(); btn_cmd = -1; }
       else                                            { current_speed = 0; btn_cmd = 0; }
+      operator_speed = current_speed;
+      operator_update = 1;
 
       if (btn_cmd != last_btn_cmd)
       {
         last_btn_cmd = btn_cmd;
-        if (btn_cmd == 1)       LOG("[BTN] FWD -> speed=%d", MOTOR_TEST_SPEED);
-        else if (btn_cmd == -1) LOG("[BTN] BACK -> speed=%d", -MOTOR_TEST_SPEED);
+        if (btn_cmd == 1)       LOG("[BTN] FWD -> speed=%d", (int)Runtime_Speed());
+        else if (btn_cmd == -1) LOG("[BTN] BACK -> speed=%d", -(int)Runtime_Speed());
         else                    LOG("[BTN] released -> STOP");
       }
     }
@@ -773,7 +627,7 @@ void StartMotionControlTask(void *argument)
       /* (2) 前进意图边沿检测：speed 从 <=0 跳到 >0 记一次 */
       if (s_obs_lock)
       {
-        if (s_obs_prev_cmd_spd <= 0 && current_speed > 0)
+        if (operator_update && s_obs_prev_cmd_spd <= 0 && operator_speed > 0)
         {
           /* 超时窗口：两次确认间隔过久则重新计数，避免"很久以前推过一次"被算进来 */
           if (s_obs_last_intent_ms != 0U &&
@@ -808,7 +662,9 @@ void StartMotionControlTask(void *argument)
           }
         }
       }
-      s_obs_prev_cmd_spd = current_speed;
+      /* A safety-generated zero is not an operator release. Only received
+         commands / physical buttons may create another unlock edge. */
+      if (operator_update) s_obs_prev_cmd_spd = operator_speed;
 
       /* (3) 锁定生效：前进归零，后退放行（倒车脱困） */
       if (s_obs_lock && current_speed > 0)
@@ -852,7 +708,7 @@ void StartMotionControlTask(void *argument)
      *   不会因为链路问题冲出线外。龙芯只负责启停、认点、到点放行。 */
     if (current_mode == MODE_LINE_ONLY || current_mode == MODE_LINE_VISION)
     {
-      if (!Patrol_IsActive()) Patrol_Start();     /* 切入循迹模式即自动启动 */
+      if (previousMode != current_mode && !Patrol_IsActive()) Patrol_Start();     /* 切入循迹模式即自动启动 */
 
       int16_t p_spd = 0, p_str = 0;
       /* 前向距离：超声波(已中值滤波)，HC_NO_TARGET_CM 表示空旷 */
@@ -895,6 +751,7 @@ void StartMotionControlTask(void *argument)
       LOG("[PATROL] stopped (mode=%u)", current_mode);
     }
 
+    previousMode = current_mode;
     // ===== 2. 阿克曼驱动速度合成 =====
     /* ★ 2026-07-21 阿克曼修正（实施方案 §2.6 / §3.1）：
      *   旧实现按【差速车】用 steering 合成 turn_factor，让左右轮一加一减。
@@ -908,18 +765,30 @@ void StartMotionControlTask(void *argument)
      *     但本车轮距 W 小、巡检转弯半径大，该差值 <2%，且后轮多为差速器/
      *     独立驱动可自行吸收；引入它反而需要精确的 δ 反馈，得不偿失。
      *     故统一给同速——这也是绝大多数阿克曼小车的标准做法。） */
-    #define CLAMP_SPD(v)  do { if ((v) > MAX_SPEED) (v) = MAX_SPEED; \
-                                if ((v) < -MAX_SPEED) (v) = -MAX_SPEED; } while(0)
+    #define CLAMP_SPD(v)  do { if ((v) > CONTROL_SPEED_MAX_LEVEL) (v) = CONTROL_SPEED_MAX_LEVEL; \
+                                if ((v) < -CONTROL_SPEED_MAX_LEVEL) (v) = -CONTROL_SPEED_MAX_LEVEL; } while(0)
 
     int16_t left_speed  = current_speed;
     int16_t right_speed = current_speed;
 
-    if (!remote_active)
+    const uint8_t autonomous_mode =
+        (current_mode == MODE_LINE_ONLY || current_mode == MODE_LINE_VISION) ? 1U : 0U;
+
+    if (autonomous_mode)
+    {
+      /* 自主巡检快环属于 F4 本地控制，不受上位机遥控帧年龄影响。
+         CAN 短暂断流时仍持续循线；模式/急停命令恢复后会立即接管。 */
+      CLAMP_SPD(left_speed);
+      CLAMP_SPD(right_speed);
+      s_last_left_spd  = left_speed;
+      s_last_right_spd = right_speed;
+    }
+    else if (!remote_active)
     {
       s_last_left_spd = current_speed;
       s_last_right_spd = current_speed;
     }
-    else if (s_remote_age <= HB_ACTIVE_MAX)
+    else if ((uint32_t)(osKernelGetTickCount()-s_remote_tick) <= HB_ACTIVE_MAX)
     {
       /* 阿克曼：两驱动轮同速，不做差速合成（s_raw_steering 只驱动舵机，见第 1 段） */
       CLAMP_SPD(left_speed);
@@ -927,7 +796,7 @@ void StartMotionControlTask(void *argument)
       s_last_left_spd  = left_speed;
       s_last_right_spd = right_speed;
     }
-    else if (s_remote_age <= HB_HOLD_MAX)
+    else if ((uint32_t)(osKernelGetTickCount()-s_remote_tick) <= HB_HOLD_MAX)
     {
       left_speed  = s_last_left_spd;
       right_speed = s_last_right_spd;
@@ -942,86 +811,47 @@ void StartMotionControlTask(void *argument)
       s_last_right_spd = 0;
       s_raw_steering   = 0;
       Servo_SetSmoothAngle(SERVO_ANGLE_MID, RAMP_SWITCH_STEP);
-      /* 链路断开时若有测试在跑 → 一并终止（安全） */
-      if (test_mode != PID_TEST_OFF)
-      {
-        test_mode = PID_TEST_OFF;
-        PID_Reset(&pid_left); PID_Reset(&pid_right);
-        LOG("[PID] link lost -> test abort");
-      }
+
     }
 
-    // ===== 3. 编码器更新（本任务独占——修复旧版双任务竞态） =====
-    Encoder_Update();
-    int32_t c1 = Encoder1_GetCount();
-    int32_t c2 = Encoder2_GetCount();
-    int16_t dL = (int16_t)(c1 - pid_prev_cnt1);   /* 本周期实测脉冲增量 */
-    int16_t dR = (int16_t)(c2 - pid_prev_cnt2);
-    pid_prev_cnt1 = c1;
-    pid_prev_cnt2 = c2;
-
-    // ===== 4. 电机输出（测试激励 > 闭环 > 开环 三级） =====
-    int16_t outL = 0, outR = 0;
-    int16_t teleTargL = 0, teleTargR = 0;
-
-    if (test_mode == PID_TEST_OPEN_LOOP)
-    {
-      /* 开环直给 PWM：方向自检 / MAX_DELTA 标定（看 meas 稳态值） */
-      outL = test_L; outR = test_R;
-      teleTargL = test_L; teleTargR = test_R;
-      Motor1_Set(outL);
-      Motor2_Set(outR);
-    }
-    else if (test_mode == PID_TEST_CLOSED)
-    {
-      /* 闭环阶跃：目标=编码器增量 counts/周期（Kp/Ki/Kd 整定） */
-      teleTargL = test_L; teleTargR = test_R;
-      if (test_L == 0) { PID_Reset(&pid_left);  outL = 0; }
-      else outL = (int16_t)PID_Update(&pid_left,  (float)test_L, (float)dL, MOTION_PID_DT);
-      if (test_R == 0) { PID_Reset(&pid_right); outR = 0; }
-      else outR = (int16_t)PID_Update(&pid_right, (float)test_R, (float)dR, MOTION_PID_DT);
-      Motor1_Set(outL);
-      Motor2_Set(outR);
-    }
-    else if (g_pid.closed_loop)
-    {
-      /* 常规闭环：命令速度(-1000~1000) 映射为目标脉冲增量 */
-      float targL = (float)left_speed  / (float)MAX_SPEED * g_pid.max_delta;
-      float targR = (float)right_speed / (float)MAX_SPEED * g_pid.max_delta;
-      teleTargL = (int16_t)targL; teleTargR = (int16_t)targR;
-      if (left_speed == 0)  { PID_Reset(&pid_left);  outL = 0; }
-      else outL = (int16_t)PID_Update(&pid_left,  targL, (float)dL, MOTION_PID_DT);
-      if (right_speed == 0) { PID_Reset(&pid_right); outR = 0; }
-      else outR = (int16_t)PID_Update(&pid_right, targR, (float)dR, MOTION_PID_DT);
-      Motor1_Set(outL);
-      Motor2_Set(outR);
-    }
-    else
-    {
-      /* 开环直通（出厂默认，已验证能动） */
-      outL = left_speed; outR = right_speed;
-      teleTargL = left_speed; teleTargR = right_speed;
-      Motor1_Set(outL);
-      Motor2_Set(outR);
-    }
-
-    // ===== 5. 发布快照（TelemetryTask 打包上报；本任务不再直接发串口） =====
-    g_pt_flags = (uint8_t)((g_pid.closed_loop ? 0x01 : 0) |
-                           (test_mode != PID_TEST_OFF ? 0x02 : 0) |
-                           ((test_mode & 0x03) << 4));
-    g_pt_targL = teleTargL; g_pt_measL = dL; g_pt_outL = outL;
-    g_pt_targR = teleTargR; g_pt_measR = dR; g_pt_outR = outR;
-    g_mot_speed      = current_speed;
+    /* Every motion source shares this limit, including heartbeat-held commands.
+       PID duty is still free to reach the limited encoder target under load. */
+    left_speed = Control_Clamp(left_speed, Runtime_Speed());
+    right_speed = Control_Clamp(right_speed, Runtime_Speed());
+    /* DWT runs during IRQ masking and measures the actual encoder interval.
+       Calibration no longer assumes every loop physically lasts exactly 17ms. */
+    uint32_t cycles = DWT->CYCCNT;
+    uint32_t elapsedUs = sampleCycles ? (uint32_t)(cycles-sampleCycles)/(SystemCoreClock/1000000U) : 17000U;
+    sampleCycles = cycles;
+    Encoder_UpdateElapsed(elapsedUs);
+    int16_t outputs[2];
+    /* 2026-10-09 single-wheel test: Motor1 drives ENC2; Motor2 drives ENC1. */
+    Motion_Update(&motion,left_speed,s_raw_steering,Encoder2_GetDelta(),Encoder1_GetDelta(),
+                  elapsedUs,Encoder_IsSampleValid(),outputs);
+    /* High gear -> sharp turn: slow first, then progressively admit the
+       requested angle. Servo_RampTick above consumes this bounded target
+       on the next cycle; every motion source uses the same envelope. */
+    int16_t safeSteering=Motion_LimitSteering(&motion,s_raw_steering);
+    int16_t safeAngle=-(int16_t)((int32_t)safeSteering*90/1000);
+    if(safeAngle<SERVO_ANGLE_MIN) safeAngle=SERVO_ANGLE_MIN;
+    if(safeAngle>SERVO_ANGLE_MAX) safeAngle=SERVO_ANGLE_MAX;
+    Servo_SetSmoothAngle(safeAngle,RAMP_REMOTE_STEP);
+    Motor1_Set(outputs[0]);Motor2_Set(outputs[1]);
+    g_pt_flags = (uint8_t)(1U | (motion.fault ? 4U : 0U));
+    g_motion_fault = motion.fault;
+    g_motion_dt_us = elapsedUs;
+    g_pt_targL = g_pt_targR = (int16_t)motion.command;
+    g_pt_measL = Motion_TelemetryCps(motion.measured[0]);g_pt_measR = Motion_TelemetryCps(motion.measured[1]);
+    g_pt_outL = outputs[0];g_pt_outR = outputs[1];
+    g_mot_speed = motion.fault ? 0 : (int16_t)motion.command;
     g_mot_steer_tele = -(int16_t)((int32_t)Servo_GetCurrentAngle() * 1000 / 90);
     g_mot_mode       = current_mode;
 
-    if (remote_active && s_remote_age <= HB_HOLD_MAX + 100)
-    {
-      s_remote_age++;
-    }
     g_remote_active = remote_active;
 
-    osDelay(17);
+    controlDeadline += 17U;
+    if ((int32_t)(controlDeadline-osKernelGetTickCount()) > 0) osDelayUntil(controlDeadline);
+    else { controlDeadline=osKernelGetTickCount(); osDelay(1); }
   }
   /* USER CODE END StartMotionControlTask */
 }
@@ -1096,6 +926,7 @@ void Ranging(void *argument)
 
   uint32_t cyc = 0;
   uint32_t hc_last_ms = 0;   /* 上次发起 HC 测量的时刻，用于 ≥60ms 间隔限速 */
+  uint32_t vl53_retry_ms = HAL_GetTick();
   /* VL53 超量程去抖：连续 VL53_MISS_N 次才判"真的没目标"，期间保持最后有效值 */
   #define VL53_MISS_N   5U   /* 5 次 × 10ms ≈ 50ms */
   uint8_t  s_vl53_miss = 0;
@@ -1113,8 +944,9 @@ void Ranging(void *argument)
       hc_last_ms = HAL_GetTick();
     }
 
-    /* 循迹 TCRT×3：1ms 采样 + 去抖(3拍=3ms 收敛)，发布位域供遥测/循线消费 */
+    /* 循迹 TCRT×3：内部固定5ms中值/迟滞采样，多任务读取不会加快去抖。 */
     g_line_bits = LineTrack_PackBits(LineTrack_Read());
+    Runtime_SetLineReady(LineTrack_IsCalibrated());
 
     /* VL53 非阻塞取样（~30ms 测量预算，10ms 轮询足够取走每个样本） */
     if ((++cyc % 10U) == 0U)
@@ -1147,7 +979,8 @@ void Ranging(void *argument)
 
     /* VL53 运行时自恢复：未就绪时每 ~2s 重试一次 init。上电后再补接线/补供电也能
        自动恢复，无需重烧。仅传感器缺失时才跑（正常工作此分支从不触发，零开销）。 */
-    if (!VL53_IsPresent() && (cyc % 2000U == 0U))
+    if (!VL53_IsPresent()) g_vl53_mm = VL53_OUT_OF_RANGE;
+    if (!VL53_IsPresent() && HAL_GetTick() - vl53_retry_ms >= 2000U)
     {
       /* ★ 2026-07-23：与 MLX 同理，先做总线级恢复。VL53L0X 挂死拉低 SDA 时，
          单纯重跑 VL53_Init 会在第一条 I2C 命令上就失败，永远恢复不了。
@@ -1158,6 +991,7 @@ void Ranging(void *argument)
         if (!busOk) LOG("[VL53] I2C2 bus recover: SDA STILL LOW (check 3V3 supply / pull-ups)");
       }
       if (VL53_Init() == 0) LOG("[VL53] runtime recovery OK -> ranging live");
+      vl53_retry_ms = HAL_GetTick();
     }
 
     osDelay(1);
@@ -1184,7 +1018,9 @@ void Telemetry(void *argument)
   uint8_t  frame[FRAME_PIDTELE_LENGTH];   /* 27B，够放所有帧型 */
   uint8_t  exFrame[FRAME_EXT_LENGTH];
   ControlData cd;
+  #if PID_TUNING_ENABLED
   uint16_t seq = 0;
+  #endif
   uint32_t tick = 0;
 
   for(;;)
@@ -1197,7 +1033,30 @@ void Telemetry(void *argument)
           (见 MotionControlTask 的 HB_HOLD_MAX 分支)，不再门控上行数据。 */
     {
       tick++;
+      if (tick % 25U == 0U) {
+        uint8_t status[20] = {0xAA, 0x64, 16};
+        Runtime_Status(&status[3]);
+        status[19] = Protocol_CalculateChecksum(status,19);
+        USART3_SendFrameSync(status,20);
+#if LINK_USE_CAN
+        CANLink_Send(COBID_EVT,&status[3],8);
+        CANLink_Send(COBID_EVT,&status[11],8);
+#endif
+      }
 
+      if (tick % 150U == 0U) {
+        LOG("[MOTION] target=%d cps | motor1/left=%d cps pwm=%d | motor2/right=%d cps pwm=%d | dt=%luus fault=%u",
+          g_mot_speed,g_pt_measL,g_pt_outL,g_pt_measR,g_pt_outR,(unsigned long)g_motion_dt_us,g_motion_fault);
+      }
+#if LINK_USE_CAN
+      if (tick % 5U == 0U) {
+        uint8_t motionStatus[8]={6,(uint8_t)(g_mot_speed>>8),(uint8_t)g_mot_speed,
+          (uint8_t)(g_pt_measR>>8),(uint8_t)g_pt_measR,(uint8_t)(g_pt_measL>>8),(uint8_t)g_pt_measL,g_motion_fault};
+        uint8_t motionOutput[8]={7,(uint8_t)(g_pt_outR>>8),(uint8_t)g_pt_outR,
+          (uint8_t)(g_pt_outL>>8),(uint8_t)g_pt_outL,(uint8_t)(g_motion_dt_us/1000U),g_motion_fault,1};
+        CANLink_Send(COBID_EVT,motionStatus,8);CANLink_Send(COBID_EVT,motionOutput,8);
+      }
+#endif
       /* ---- 7B 遥测 + 扩展帧（每 3 拍 = 60ms） ---- */
       if (tick % 3U == 0U)
       {
@@ -1251,6 +1110,7 @@ void Telemetry(void *argument)
 #endif
 
       /* ---- PID 遥测 0x62：测试中每拍(20ms=50Hz)，平时每 10 拍(200ms) ---- */
+      #if PID_TUNING_ENABLED
       uint8_t testActive = (g_pt_flags & 0x02U) != 0U;
       if (testActive || (tick % 10U == 0U))
       {
@@ -1267,6 +1127,7 @@ void Telemetry(void *argument)
             Encoder1_GetCount(), Encoder2_GetCount());
 #endif
       }
+      #endif
     }
     osDelay(20);
   }
@@ -1290,14 +1151,18 @@ void Env(void *argument)
   static int8_t  s_temp   = 0;
   static uint8_t s_humi   = 0;
   static uint8_t s_dht_ok = 0;
+  static uint8_t s_ambient_hot = 0;
   static uint8_t s_dht_fail = 0;   /* 连续失败计数：去抖，偶发失败不丢显示 */
   /* ★ 2026-07-23：最后一次成功读取的时刻。
      原来只有"连续失败 3 次"这一个判据，但如果失败与成功交替出现
      （偶发成功把 s_dht_fail 清零），就永远达不到 3 次，
      即使实际刷新率已经低到几十秒一次，上位机看到的仍是 dhtOk=1 的陈旧值。
      加一个绝对新鲜度判据：超过 DHT_STALE_MS 没有成功读到，一律判无效。 */
-  #define DHT_STALE_MS   15000U    /* 采样周期 2s，15s 没成功 = 真的坏了 */
+  #define DHT_SAMPLE_MS   2100U    /* DHT11 不允许快速重读，留出略大于 2s 的裕量 */
+  #define DHT_STALE_MS    7000U    /* 连续约 3 个采样周期无成功就明确标无效 */
   static uint32_t s_dht_ok_ms = 0;
+  static uint16_t s_dht_seq = 0;
+  static uint32_t s_dht_next_ms = 0;
 
   /* 障碍双重验证阈值：VL53(mm) 与 超声波(cm) 同时近才确认 */
   #define ENV_OBST_TH_MM   300U   /* 30cm */
@@ -1320,24 +1185,22 @@ void Env(void *argument)
     uint16_t vl53_mm = g_vl53_mm;                    /* RangingTask 发布 */
     uint8_t  vl53_ok = (vl53_mm != VL53_OUT_OF_RANGE);
 
-    /* ---- DHT11：每 2 秒读一次（★手册要求采样间隔≥2s，原 1s 太快必频繁失败，
-       是"温湿度只刷新一次后冻结"的根因）+ 失败重试 + 连续失败去抖 ---- */
-    if ((cycle % 20U) == 0U)
+    /* ---- DHT11：严格按 >=2s 单次采样。旧版失败后每 30ms 连读三次，传感器
+       尚未完成内部测量就再次收到起始脉冲，既不能提高成功率，还连续占用实时任务。 */
+    uint32_t nowMs = HAL_GetTick();
+    if (s_dht_next_ms == 0U || (int32_t)(nowMs - s_dht_next_ms) >= 0)
     {
       int8_t  t = s_temp;
       uint8_t h = s_humi;
-      uint8_t ok = 0;
-      for (uint8_t retry = 0; retry < 3U && !ok; retry++)   /* 失败重试最多3次 */
-      {
-        ok = DHT11_Read(&t, &h);
-        if (!ok) osDelay(30);                                /* 重试前小憩，让单总线复位 */
-      }
+      uint8_t ok = DHT11_Read(&t, &h);
+      s_dht_next_ms = HAL_GetTick() + DHT_SAMPLE_MS;
       if (ok)
       {
         s_temp = t; s_humi = h;     /* 更新最后有效值 */
         s_dht_fail = 0;
         s_dht_ok = 1;
         s_dht_ok_ms = HAL_GetTick();
+        if (++s_dht_seq == 0) ++s_dht_seq;
       }
       else
       {
@@ -1360,12 +1223,26 @@ void Env(void *argument)
     /* ---- 3. 报警等级 + 蜂鸣 + PD2 联动 ---- */
     uint8_t       alarm;
     BuzzerPattern pat;
-    if (flame || gas_alarm)      { alarm = ALARM_LV_FIRE; pat = BUZZER_ALARM; }
-    else if (obstacle)           { alarm = ALARM_LV_WARN; pat = BUZZER_WARN;  }
-    else                         { alarm = ALARM_LV_NONE; pat = BUZZER_OFF;   }
+    uint32_t alarmNow=HAL_GetTick();
+    uint8_t remoteFlags=Runtime_RemoteFlags(alarmNow);
+    uint8_t remoteVisionAlarm=(remoteFlags&1U)?2U:(remoteFlags&2U)?1U:0U;
+    uint8_t legacyVision=(g_remote_vision_ms && alarmNow-g_remote_vision_ms<3000U)?g_remote_vision_alarm:0U;
+    if(legacyVision>remoteVisionAlarm) remoteVisionAlarm=legacyVision;
+    if (s_dht_ok && HAL_GetTick()-s_dht_ok_ms<7000U) {
+      if(s_temp>=45) s_ambient_hot=1;
+      else if(s_temp<=42) s_ambient_hot=0;
+    } else s_ambient_hot=0;
+    if (s_ambient_hot || (remoteFlags&4U))           { alarm = ALARM_LV_FIRE; pat = BUZZER_FLAME; }
+    else if (flame)                   { alarm = ALARM_LV_FIRE; pat = BUZZER_FLAME;    }
+    else if (remoteVisionAlarm == 2U)
+                                { alarm = ALARM_LV_FIRE; pat = BUZZER_FLAME;    }
+    else if (gas_alarm)          { alarm = ALARM_LV_FIRE; pat = BUZZER_GAS;      }
+    else if (remoteVisionAlarm == 1U)
+                                { alarm = ALARM_LV_FIRE; pat = BUZZER_GAS;      }
+    else if (obstacle)           { alarm = ALARM_LV_WARN; pat = BUZZER_OBSTACLE; }
+    else                         { alarm = ALARM_LV_NONE; pat = BUZZER_OFF;      }
 
     Buzzer_SetPattern(pat);
-    Buzzer_Tick(100);
     HAL_GPIO_WritePin(ALARM_OUT_GPIO_Port, ALARM_OUT_Pin,
                       (alarm == ALARM_LV_FIRE) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
@@ -1380,8 +1257,10 @@ void Env(void *argument)
     if (Buzzer_IsSounding()) flags |= ENV_FLAG_BUZZER;
     if (g_obs_lock)          flags |= ENV_FLAG_OBS_LOCK;   /* 遥控避障锁生效中 */
 
-    /* ---- 5. 2Hz 上报 0x5C（与命令心跳解耦：无条件持续上报，不掉线） ---- */
-    if ((cycle % 5U) == 0U)
+    Runtime_Env(flags,s_temp,s_dht_seq,s_dht_ok_ms);
+
+    /* ---- 5. 5Hz 上报 0x5C（与命令心跳解耦：无条件持续上报，不掉线） ---- */
+    if ((cycle % 2U) == 0U)
     {
       uint8_t envFrame[FRAME_ENV_LENGTH];
       uint8_t envLen = Protocol_PackEnvFrame(
@@ -1400,8 +1279,9 @@ void Env(void *argument)
       LOG("[DIST] ultra(HC)=%ucm pulse=%uus | laser(VL53)=%umm ok=%u okcnt=%lu | remote=%u",
           hc_cm, (unsigned)HC_GetLastPulse_us(), vl53_mm, vl53_ok,
           g_vl53_ok_cnt, g_remote_active);
-      LOG("[ENV]  gas=%u T=%dC H=%u%% dhtOk=%u fail=%u flame=%u obst=%u",
-          gas_raw, (int)s_temp, s_humi, s_dht_ok, s_dht_fail, flame, obstacle);
+      LOG("[ENV]  gas=%u T=%dC H=%u%% dhtOk=%u fail=%u err=%u flame=%u obst=%u",
+          gas_raw, (int)s_temp, s_humi, s_dht_ok, s_dht_fail,
+          (unsigned)DHT11_GetLastError(), flame, obstacle);
       /* 循迹核查：L/C/R=压线(1)/离线(0)，J=路口 X=丢线。压/离黑线时应即时翻转 */
       { uint8_t lb = g_line_bits;
         LOG("[LINE] L=%u C=%u R=%u  J=%u X=%u  (bits=0x%02X)",
@@ -1412,13 +1292,14 @@ void Env(void *argument)
       /* ★ 阈值标定用：白底放一次、黑线放一次，各记三路读数，
          按 linetrack.h 里的说明定 LINE_ADC_ON_TH / OFF_TH。
          同时打 MQ2 通道，便于确认 DMA 扫描确实在刷新（四个值都不动=DMA 停了）。 */
-      { uint16_t rl, rc, rr;
+      { uint16_t rl, rc, rr, off[3], on[3]; uint8_t ready;
         LineTrack_GetRaw(&rl, &rc, &rr);
-        LOG("[LINE_ADC] L=%4u(%u~%u) C=%4u(%u~%u) R=%4u(%u~%u) | mq2=%4u dma=%u",
-            rl, (unsigned)LINE_ADC_OFF_TH_L, (unsigned)LINE_ADC_ON_TH_L,
-            rc, (unsigned)LINE_ADC_OFF_TH_C, (unsigned)LINE_ADC_ON_TH_C,
-            rr, (unsigned)LINE_ADC_OFF_TH_R, (unsigned)LINE_ADC_ON_TH_R,
-            (unsigned)g_adc_dma[ADC_CH_MQ2], ADC_IsStreaming()); }
+        LineTrack_GetThresholds(off, on, &ready);
+        LOG("[LINE_ADC] L=%4u(%u~%u) C=%4u(%u~%u) R=%4u(%u~%u) | mq2=%4u dma=%u ready=0x%02X",
+            rl, (unsigned)off[0], (unsigned)on[0],
+            rc, (unsigned)off[1], (unsigned)on[1],
+            rr, (unsigned)off[2], (unsigned)on[2],
+            (unsigned)g_adc_dma[ADC_CH_MQ2], ADC_IsStreaming(), ready); }
 #endif
     }
 
@@ -1441,70 +1322,64 @@ void Thermal(void *argument)
 #if THERMAL_TASK_ENABLED
   /* 热成像原始帧转发（Low，~2Hz，USART1 专线）：F4 只读原始帧不解算，
      0x5E EEPROM(上电一次) + 0x5D 原始帧 → 龙芯 Melexis 解算。 */
-  /* ★ 2026-07-23 重大修复：上电初始化失败【不再永久挂起任务】。
-   *   旧实现是 `if (rc != 0) { for(;;) osDelay(1000); }` —— 只要上电那一刻
-   *   MLX90640 没响应（供电未稳、I2C 总线残留在上次掉电时的死锁态），
-   *   ThermalTask 就永久挂死：此后既没有任何热成像数据，也没有任何 [THERM]
-   *   日志，主循环里的 I2C 总线恢复逻辑更是永远没机会运行。
-   *   现象就是"必须整机断电重来、碰运气才能让热成像活"。
-   *   现改为无限重试：每 2s 一次，每次先做 I2C3 总线级恢复再 init，
-   *   成功即进入正常转发主循环。传感器晚就绪 / 事后补供电都能自愈。 */
-  {
-    int rc = Thermal_Init();
-    uint32_t bootRetry = 0;
-    while (rc != 0)
-    {
-      bootRetry++;
-      /* 前几次只重试 init（可能只是上电时序没稳），之后每次都带总线恢复 */
-      if (bootRetry >= 2U) {
-        uint8_t busOk = I2C3_BusRecover();
-        if ((bootRetry % 15U) == 2U)   /* 每 ~30s 打一条，避免刷屏 */
-          LOG("[THERM] init retry #%lu: I2C3 recover(%s, cnt=%lu) rc=%d",
-              (unsigned long)bootRetry, busOk ? "SDA released" : "SDA STILL LOW",
-              (unsigned long)I2C_RecoverCount(), rc);
-      } else {
-        LOG("[THERM] init FAILED rc=%d -> MLX90640 无响应(查 I2C3 PA8/PC9 与 3.3V)，每 2s 重试", rc);
-      }
-      osDelay(2000);
-      rc = Thermal_Init();
-    }
-    if (bootRetry)
-      LOG("[THERM] init OK after %lu retries", (unsigned long)bootRetry);
-  }
-  LOG("[THERM] init OK -> raw-forward: 0x5E EEPROM(once)+0x5D frames via USART1");
-
+  uint8_t initialized = 0;
+  uint32_t retryAt = 0;
   uint8_t  frame[FRAME_MLXCHUNK_MAXLEN];
   uint8_t  eeSent = 0;
-  uint32_t loopCnt = 0, framesSent = 0;
-  uint8_t  hushLogged = 0;
+  uint32_t loopCnt = 0, framesSent = 0, txFail = 0;
+  uint32_t nextEeMs = 0;
   uint16_t failStreak = 0;   /* 连续原始帧读取失败计数：坏态自恢复触发 */
   for (;;)
   {
-    /* ★PID 在线整定期间暂停热成像转发：热成像帧大、与 50Hz PID 遥测抢龙芯→上位机
-       的 TCP 带宽会导致掉线。g_pt_flags bit1=测试激励进行中(MotionControlTask 维护)。
-       测试期间把链路让给 PID 曲线；测试结束自动恢复。 */
-    uint8_t pidTesting = (g_pt_flags & 0x02U) != 0U;
-    if (pidTesting && !hushLogged) { LOG("[THERM] PID test active -> thermal TX paused"); hushLogged = 1; }
-    if (!pidTesting) hushLogged = 0;
-
-    /* 与命令心跳解耦：热成像走 USART1 专线，只在 PID 在线整定时让出带宽，
-       其余时刻持续转发（不再因 g_remote_active=0 而停发→龙芯热成像不再冻结）。 */
-    if (!pidTesting)
+    uint32_t now = HAL_GetTick();
+    uint16_t reason = Runtime_ThermalReason(now);
+    if (!reason) {
+      Runtime_SetThermalState(TH_STOPPED);
+      initialized = 0; eeSent = 0; nextEeMs = 0; failStreak = 0;
+      osDelay(100); continue; /* no I2C reads, TX or computation while off */
+    }
+    if (!initialized) {
+      if (retryAt && (int32_t)(now-retryAt)<0) { osDelay(100); continue; }
+      Runtime_SetThermalState(TH_STARTING);
+      if (Thermal_Init() != 0) {
+        Runtime_SetThermalState(TH_FAULT); I2C3_BusRecover();
+        retryAt = HAL_GetTick()+2000U; osDelay(100); continue;
+      }
+      initialized = 1; retryAt = 0; eeSent = 0; nextEeMs = 0;
+      osDelay(600); /* first measurement after wake */
+    }
+    if (Runtime_TakeEepromRequest()) { eeSent=0; nextEeMs=0; }
     {
-      if (!eeSent)
+      if (!eeSent && (nextEeMs == 0U || (int32_t)(HAL_GetTick() - nextEeMs) >= 0))
       {
         const uint16_t *ee = Thermal_GetEE();
+        uint8_t eeTxOk = 1;
         for (uint8_t idx = 0; (int)idx * MLX_CHUNK_WORDS < MLX_EE_WORDS; idx++)
         {
           int start = (int)idx * MLX_CHUNK_WORDS;
           int rem   = MLX_EE_WORDS - start;
           uint8_t cnt = (rem >= MLX_CHUNK_WORDS) ? MLX_CHUNK_WORDS : (uint8_t)rem;
           uint8_t len = Protocol_PackMlxChunk(FRAME_EEPROM_MARKER, idx, &ee[start], cnt, frame);
-          HAL_UART_Transmit(&huart1, frame, len, 50);
-          osDelay(2);
+          /* EEPROM 决定所有温度解算参数，每块发两遍。龙芯按 idx 位图去重，
+             任一副本通过校验即可，优先保证标定参数可靠到达。 */
+          for (uint8_t copy = 0; copy < 2U; copy++) {
+            if (HAL_UART_Transmit(&huart1, frame, len, 500) != HAL_OK) {
+              eeTxOk = 0;
+              txFail++;
+            }
+          }
         }
-        eeSent = 1;
-        LOG("[THERM] EEPROM forwarded");
+        if (eeTxOk) {
+          eeSent = 1;
+          nextEeMs = HAL_GetTick() + 10000U;
+          LOG("[THERM] EEPROM forwarded hash=%08lX recover=%lu (2 copies/chunk)",
+              (unsigned long)Thermal_GetEEFingerprint(),
+              (unsigned long)Thermal_GetEERecoverCount());
+        } else {
+          nextEeMs = HAL_GetTick() + 1000U;
+          LOG("[THERM] EEPROM TX failed, retry next loop (txFail=%lu)",
+              (unsigned long)txFail);
+        }
       }
 
       int rf = Thermal_ReadRawSubpage();
@@ -1512,23 +1387,29 @@ void Thermal(void *argument)
       {
         failStreak = 0;
         const uint16_t *raw = Thermal_GetRawFrame();
+        uint8_t rawTxOk = 1;
         for (uint8_t idx = 0; (int)idx * MLX_CHUNK_WORDS < MLX_FRAME_WORDS; idx++)
         {
           int start = (int)idx * MLX_CHUNK_WORDS;
           int rem   = MLX_FRAME_WORDS - start;
           uint8_t cnt = (rem >= MLX_CHUNK_WORDS) ? MLX_CHUNK_WORDS : (uint8_t)rem;
           uint8_t len = Protocol_PackMlxChunk(FRAME_RAWTHERM_MARKER, idx, &raw[start], cnt, frame);
-          HAL_UART_Transmit(&huart1, frame, len, 50);
-          osDelay(2);
+          if (HAL_UART_Transmit(&huart1, frame, len, 500) != HAL_OK) {
+            rawTxOk = 0;
+            txFail++;
+            break;
+          }
         }
-        framesSent++;
+        if (rawTxOk) { framesSent++; Runtime_SetThermalState(TH_STREAMING); }
+        else Runtime_SetThermalState(TH_FAULT);
       }
       else
       {
         /* MLX 连续读失败=传感器掉坏态(供电/EMI/地弹后停刷)。就绪位轮询现已超时
            返回(见 MLX90640_API.c 修复)，不再永久挂死；此处连续 ~2s(10×200ms)
            失败即重初始化 MLX 恢复，USART1(PA9) 热成像输出可自愈，不需重启 F4。 */
-        if (++failStreak >= 10U)
+        Runtime_SetThermalState(TH_FAULT);
+        if (++failStreak >= 3U)
         {
           /* ★ 2026-07-23：先做【总线级】恢复再重初始化。
              MLX90640 在供电波动/EMI 下会在传输中途挂死并把 SDA 一直拉低，
@@ -1540,17 +1421,28 @@ void Thermal(void *argument)
           LOG("[THERM] raw read fail x%u -> I2C3 bus recover(%s, cnt=%lu) + re-init",
               failStreak, busOk ? "SDA released" : "SDA STILL LOW",
               (unsigned long)I2C_RecoverCount());
-          if (Thermal_Init() == 0) { eeSent = 0; failStreak = 0; LOG("[THERM] re-init OK, EEPROM will resend"); }
-          else                     { failStreak = 0; osDelay(1000); LOG("[THERM] re-init FAILED, retry later"); }
+          if (Thermal_Init() == 0) {
+            /* 标定副本未变化，重初始化不抢占串口重复发 EEPROM；周期重发仍能
+               覆盖龙芯晚启动。等待一个刷新周期后再读取，防止复位风暴。 */
+            failStreak = 0; eeSent = 0; nextEeMs = 0;
+            osDelay(600);
+            LOG("[THERM] re-init OK, calibration retained");
+          } else {
+            failStreak = 0;
+            osDelay(2000);
+            LOG("[THERM] re-init FAILED, retry in 2s");
+          }
         }
+        else osDelay(50);
       }
       if ((++loopCnt % 10U) == 0U)
-        LOG("[THERM] raw-forward remote=%u frames_sent=%lu", g_remote_active, framesSent);
-      /* 周期重发 EEPROM(每 ~150 拍≈30s)：中途才连上/重连的龙芯也能取到标定参数解算，
-         否则重连后热成像永远解不出(EEPROM 只在上电发过一次)。 */
-      if ((loopCnt % 150U) == 0U) eeSent = 0;
+        LOG("[THERM] raw-forward remote=%u frames_sent=%lu txFail=%lu",
+            g_remote_active, framesSent, txFail);
+      /* 每 10s 重发双副本 EEPROM，龙芯晚启动/重启后最多等待 10s 即可恢复标定。 */
+      if (eeSent && (int32_t)(HAL_GetTick() - nextEeMs) >= 0) eeSent = 0;
     }
-    osDelay(200);   /* ~2Hz/子页 */
+    /* GetFrameData 内部等待 data-ready；这里只做最小让步，不再额外固定等待 200ms。 */
+    osDelay(5);
   }
 #else
   for (;;) { osDelay(1000); }
@@ -1562,4 +1454,3 @@ void Thermal(void *argument)
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-

@@ -18,7 +18,7 @@
 
 namespace patrol {
 
-// 避障参数（距离单位 cm；速度/转向量 -1000~+1000）
+// 避障参数（距离单位 cm；速度档位 -2000~+2000；转向量 -1000~+1000）
 struct AvoidParams {
     uint16_t stopDistCm  = 25;    // < 此距离 -> 停止前进 + 原地转向脱困
     uint16_t slowDistCm  = 60;    // < 此距离 -> 减速 + 转向绕行
@@ -59,7 +59,7 @@ public:
     bool init(const std::string& device, int baud,
               const std::string& thermalDevice = "", int thermalBaud = 115200);
     void close();
-    bool isOpen() const { return useCan_ ? can_.isOpen() : serial_.isOpen(); }
+    bool isOpen() const { return controlOpen_.load(); }
 
     // 控制线程周期调用：poll 串口遥测 + 按模式计算并下发命令帧
     void tick();
@@ -76,7 +76,8 @@ public:
 
     // 手动速度/转向（MANUAL 模式使用；预留给上位机摇杆扩展）
     void setManual(int16_t speed, int16_t steering);
-    // 上位机手动驱动（FRAME_DRIVE）：切到 MANUAL、解除急停并设定速度/转向
+    // 上位机手动驱动（FRAME_DRIVE）：仅在已明确处于 MANUAL 且未急停时接受。
+    // 模式切换必须走 CMD_MODE，避免残留的手柄心跳抢占自动巡检。
     void driveManual(int16_t speed, int16_t steering);
     void setMode(uint8_t mode);
     void emergencyStop();
@@ -95,16 +96,26 @@ public:
         uint8_t     visionConf    = 0;        // 最高置信度 0~100
         std::string visionName;               // 最高分类别
         int         thermalMaxC10 = -1000;    // 热成像最高温 ×10°C，-1000=无
+        bool        thermalFresh  = false;
         bool        hotspot       = false;    // 热点告警
     };
     LinkStatus linkStatus() const;
 
     // 取出最新热成像帧（若自上次取用后有新帧）。有新帧返回 true 并填 out/cols/rows。
-    bool takeThermal(std::vector<int16_t>& out, int& cols, int& rows);
+    bool takeThermal(std::vector<int16_t>& out, int& cols, int& rows, uint32_t* generation=nullptr);
+    uint32_t thermalGeneration() const { return thermalEpoch_.load(); }
+    bool thermalAllowed() const { return thermalExpected_.load(); }
 
     RobotMode mode() const;
+    void setUpperConnected(bool online);
+    void setSpeedGear(uint8_t gear);
+    void setSpeedPersisted(bool ok);
+    std::vector<uint8_t> deviceStatus() const;
+
 
 private:
+    void onMotionStatus(const uint8_t*, size_t);
+    void onRuntimeStatus(const uint8_t*, size_t);
     void onTelemetry(const serial_proto::Telemetry& t);            // 串口回调（控制线程）
     void onThermal(const int16_t* temps, int cols, int rows);      // 串口回调（F4已解算行帧, 旧路径）
     void onEnv(const serial_proto::EnvData& e);                    // 串口回调（环境/安全帧）
@@ -138,6 +149,24 @@ private:
     AvoidParams   av_;
 
     // ---- 传输层选择（CAN / UART，一键回退）----
+    std::atomic<bool> controlOpen_{false};
+    std::string thermalDevice_;
+    int thermalBaud_=115200;
+    uint32_t openedMs_=0, lastConfigMs_=0;
+    uint8_t requestedPreview_=0, speedGear_=4, configSeq_=1;
+    bool upperConnected_=false, speedPersisted_=true;
+    bool autoArmed_=false;
+    uint32_t upperDisconnectedMs_=0;
+    int16_t motionTarget_=0, motionRight_=0, motionLeft_=0, motionPwmRight_=0, motionPwmLeft_=0;
+    uint8_t motionFault_=0, motionDtMs_=0;
+    uint32_t motionMs_=0;
+    uint8_t runtime_[16]={};
+    uint32_t runtimeMs_=0, dhtStatusMs_=0;
+    std::atomic<uint32_t> thermalEpoch_{0};
+    std::atomic<bool> eepromRequest_{true};
+    std::atomic<bool> thermalExpected_{true};
+    std::atomic<uint8_t> thermalSampleSeq_{0};
+    SerialManager::ThermalDiag thermalDiag_{};
     bool          useCan_ = false;      // true=走 can_，false=走 serial_
     std::string   canIf_;               // CAN 接口名（useCan_ 时用于重建 socket）
 
@@ -155,6 +184,9 @@ private:
     serial_proto::Telemetry telem_{};
     bool                    telemValid_  = false;
     uint32_t                lastTelemMs_ = 0;
+    bool dhtSeen_=false;
+    int8_t heldDhtTemp_=0;
+    uint8_t heldDhtHumidity_=0;
     serial_proto::EnvData   env_{};        // 最新环境/安全帧（气体/激光/温湿度/报警）
     uint32_t                lastEnvMs_   = 0;
     net::VisionResult       vision_{};     // 上位机回传的视觉识别结果
@@ -179,7 +211,7 @@ private:
     // 接收诊断计数（判断 F4->龙芯 各链路是否真的收到数据）
     uint32_t                telemRxCnt_  = 0;   // 0x5A/7字节 遥测帧
     uint32_t                envRxCnt_    = 0;   // 0x5C 环境帧
-    uint32_t                thermalRxCnt_= 0;   // 0x5B 热成像整幅
+    std::atomic<uint32_t>   thermalRxCnt_{0};   // 0x5B 热成像整幅
     ActuatorState           actuators_;   // F4 无对应硬件，仅回显给上位机
     RobotStatus             status_      = RobotStatus::Idle;
 
@@ -193,7 +225,9 @@ private:
     // 热成像热点（atomic，fillSensorData 无锁读取，避免与 thermalMtx_ 交叉锁）
     std::atomic<int>  thermalMaxC10_{-1000};   // 最高温 ×10（°C），-1000=无数据
     std::atomic<bool> thermalHotspot_{false};  // 最高温超阈（疑似火源/过热）
+    std::atomic<uint32_t> thermalLastMs_{0};   // 最近有效热像解算时间；用于清除陈旧热点
     static constexpr float kHotspotThreshC = 50.0f;  // 热点告警阈值 °C
+    static constexpr uint32_t kThermalFreshMs = 3000; // 超过 3s 未刷新视为无实时热像
 
     // 热成像解算器（龙芯端解算, 替代 F4 解算）+ 解算输出缓冲
     // ★解算(ExtractParameters/CalculateTo)只在 solverThread_ 内跑——绝不占用控制线程，
@@ -213,6 +247,7 @@ private:
     std::vector<int16_t>    thermal_;
     int                     thermalCols_ = 0;
     int                     thermalRows_ = 0;
+    uint32_t thermalFrameGeneration_=0;
     bool                    thermalNew_  = false;
 };
 

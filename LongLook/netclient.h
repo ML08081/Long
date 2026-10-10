@@ -38,7 +38,12 @@ public:
     // 视觉识别结果回传龙芯（供"大脑"判断）
     bool sendVision(quint8 count, quint8 maxConf, quint8 flags, const QString &topClass);
 
+    int speedLimit() const { return m_speedLimit; }
+    bool requestSpeed(int value);
+    bool requestThermal(int value);
 signals:
+    void deviceStatus(const QByteArray &payload);
+    void speedLimitChanged(int value);
     void connected();
     void disconnected();
     // 连接尝试进行中（第 attempt/maxAttempts 次）——供 UI 显示"连接中/重试中"状态
@@ -74,6 +79,9 @@ private:
     static constexpr int kConnectTimeoutMs = 2500; // 单次连接超时
     static constexpr int kRetryDelayMs     = 400;  // 重试间隔
 
+    int m_speedLimit=500;
+    int m_pendingSpeed=0, m_pendingThermal=-1;
+    qint64 m_speedRequestMs=0,m_thermalRequestMs=0;
     QTcpSocket *m_socket = nullptr;
     QUdpSocket *m_discovery = nullptr;   // UDP 自动发现监听
     QByteArray  m_buf;          // 接收累积缓冲
@@ -83,6 +91,7 @@ private:
     QTimer     *m_connectTimer = nullptr;  // 单次连接超时计时器
     bool        m_connecting   = false;    // 正在连接阶段（区分建链后断开）
     int         m_attempt      = 0;        // 当前已尝试次数
+    bool        m_driveEnabled = true;     // 仅显式切到手动模式后允许 FRAME_DRIVE
 };
 
 #endif // NETCLIENT_H

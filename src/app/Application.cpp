@@ -20,6 +20,10 @@
 #include <unistd.h>
 #include <poll.h>
 #include <cstdio>
+#include <fcntl.h>
+#include <cstdlib>
+#include <cerrno>
+#include <cstring>
 
 namespace patrol {
 
@@ -33,7 +37,7 @@ uint32_t nowMs() {
 // ── 单连接发送会话（方案B 第一阶段）───────────────────────────────────────────
 //   生产者(视频采集/上报线程)投递帧 → 唯一发送线程消费并串行写 socket(线程安全)。
 //   smallQ: 传感器/状态/PID遥测/热成像(保序、优先发)；video: 视频槽(新盖旧=拥塞天然丢旧帧)。
-struct TxFrame { uint8_t type; std::vector<uint8_t> data; };
+struct TxFrame { uint8_t type; std::vector<uint8_t> data; uint32_t generation, queuedMs; };
 
 struct ClientSession {
     int fd = -1;
@@ -47,11 +51,11 @@ struct ClientSession {
 
     static constexpr size_t kSmallQMax = 128;
 
-    void pushSmall(uint8_t type, const uint8_t* p, size_t n) {
+    void pushSmall(uint8_t type, const uint8_t* p, size_t n, uint32_t generation=0) {
         {
             std::lock_guard<std::mutex> lk(mtx);
             if (smallQ.size() >= kSmallQMax) smallQ.pop_front();   // 满则丢最旧(极少发生)
-            smallQ.push_back(TxFrame{type, std::vector<uint8_t>(p, p + n)});
+            smallQ.push_back(TxFrame{type, std::vector<uint8_t>(p, p + n),generation,nowMs()});
         }
         cv.notify_one();
     }
@@ -86,6 +90,27 @@ std::string firstIpv4() {
     return ip;
 }
 
+// A separate file keeps camera/CAN/display and unknown deployment keys intact.
+bool saveSpeed(const std::string& path, int speed) {
+    if(path.empty()) return false;
+    std::string temp=path+".tmp.XXXXXX";
+    std::vector<char> name(temp.begin(),temp.end()); name.push_back(0);
+    int fd=::mkstemp(name.data());
+    if(fd<0) return false;
+    char b[16]; int n=std::snprintf(b,sizeof(b),"%d\n",speed);
+    bool ok=::write(fd,b,n)==n && ::fsync(fd)==0;
+    if(::close(fd)!=0) ok=false;
+    if(ok) ok=::rename(name.data(),path.c_str())==0;
+    if(!ok) ::unlink(name.data());
+    if(ok) {
+        size_t slash=path.find_last_of('/');
+        std::string dir=slash==std::string::npos ? "." : path.substr(0,slash);
+        int d=::open(dir.c_str(),O_RDONLY|O_DIRECTORY);
+        if(d>=0) { ok=::fsync(d)==0; ::close(d); } else ok=false;
+    }
+    return ok;
+}
+
 const char* cmdName(uint8_t id) {
     switch (id) {
         case net::CMD_FAN:    return "风扇";
@@ -94,6 +119,8 @@ const char* cmdName(uint8_t id) {
         case net::CMD_LED:    return "LED";
         case net::CMD_MODE:   return "模式";
         case net::CMD_ESTOP:  return "急停";
+        case net::CMD_THERMAL:return "热像预览";
+        case net::CMD_SPEED:  return "速度档位";
         default:              return "未知";
     }
 }
@@ -171,24 +198,20 @@ int Application::run() {
     link.thermalDevice = cfg_.serialThermalDevice;
     link.thermalBaud   = cfg_.serialThermalBaud;
     robot_.init(link);
-
-    // 打开摄像头：有限次数尝试（不阻塞网络）。失败也继续——上位机仍可连上看传感器/日志，
-    // serveClient 每次连接会再懒打开一次，摄像头晚就绪也能自动恢复视频。
-    for (int attempt = 1; attempt <= 3 && running_.load(); ++attempt) {
-        if (camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps)) break;
-        LOG_WARN("摄像头 %s 打开失败（第 %d/3 次）%s",
-                 cfg_.device.c_str(), attempt,
-                 attempt < 3 ? "，1 秒后重试..." : "，暂无视频，连接后按需重试");
-        if (attempt < 3 && !interruptibleSleep(1000)) return 0;
+    if(!cfg_.runtimeSpeedPath.empty()) {
+        std::FILE* f=std::fopen(cfg_.runtimeSpeedPath.c_str(),"r");
+        if(f) {
+            int value=0; char tail=0;
+            int fields=std::fscanf(f,"%d %c",&value,&tail); std::fclose(f);
+            if(fields==1 && value>=100 && value<=2000 && (value-100)%100==0)
+                robot_.setSpeedGear(static_cast<uint8_t>((value-100)/100));
+            else LOG_WARN("忽略无效速度配置: %s",cfg_.runtimeSpeedPath.c_str());
+        }
     }
-    if (!running_.load()) return 0;
 
-    // 启动健康检测
+    // Control and retries run immediately; camera enumeration never delays them.
+    controlThread_ = std::thread([this] { controlLoop(); });
     healthCheck();
-
-    // 启动控制线程（串口遥测 + 避障 + 下发命令），独立于上位机连接
-    if (robot_.isOpen())
-        controlThread_ = std::thread([this] { controlLoop(); });
 
     // 启动 SPI 小屏显示线程（默认关闭；config.json display.enabled=true 开启）
     if (display_.init(cfg_.display))
@@ -208,7 +231,9 @@ int Application::run() {
         upperSinceMs_.store(nowMs());
         upperOnline_.store(true);
 
+        robot_.setUpperConnected(true);
         serveClient(clientFd);
+        robot_.setUpperConnected(false);
 
         upperOnline_.store(false);
         TcpServer::closeClient(clientFd);
@@ -320,24 +345,13 @@ St7789Display::RelayInfo Application::buildRelayInfo() {
     r.visionName = ls.visionName;
     r.visionConf = ls.visionConf;
     r.thermalMaxC10 = ls.thermalMaxC10;
+    r.thermalFresh = ls.thermalFresh;
     r.hotspot    = ls.hotspot;
     return r;
 }
 
 void Application::serveClient(int clientFd) {
-    // 摄像头可缺失：未打开则懒打开一次（开机晚枚举也能恢复）。无摄像头也继续服务，
-    // 仍下发传感器/状态/热成像/日志，保证上位机能连上、看到数据，绝不因摄像头而拒连。
-    if (!camera_.isOpen())
-        camera_.open(cfg_.device, cfg_.width, cfg_.height, cfg_.fps);
-    bool haveCam = camera_.isOpen() && camera_.startStreaming();
-    if (camera_.isOpen() && !haveCam)
-        LOG_WARN("启动取流失败，本次连接仅提供传感器/状态数据（无视频）");
-
-    TcpServer::sendText(clientFd,
-        haveCam
-            ? "PatrolSystem ready " + std::to_string(camera_.width()) + "x" +
-              std::to_string(camera_.height()) + (camera_.isMjpeg() ? " MJPEG" : " RAW")
-            : std::string("PatrolSystem ready (无摄像头，仅传感器/状态)"));
+    TcpServer::sendText(clientFd,"PatrolSystem ready; camera connects in background");
 
     // ==== 方案B 第一阶段：四线程解耦（发送/视频采集/上报/接收），单 socket 只由发送线程写 ====
     ClientSession session;
@@ -358,6 +372,10 @@ void Application::serveClient(int clientFd) {
                 TxFrame f = std::move(session.smallQ.front());
                 session.smallQ.pop_front();
                 lk.unlock();
+                if(f.type==net::FRAME_THERMAL && (!robot_.thermalAllowed() ||
+                    f.generation!=robot_.thermalGeneration() || nowMs()-f.queuedMs>3000)) {
+                    lk.lock(); continue;
+                }
                 auto st = TcpServer::sendFrameDroppable(session.fd, f.type,
                                                         f.data.data(), f.data.size());
                 lk.lock();
@@ -377,28 +395,27 @@ void Application::serveClient(int clientFd) {
     });
 
     // ---- 视频采集线程：grabFrame 阻塞只在本线程，不拖累发送/命令/上报。----
-    std::thread videoThread;
-    if (haveCam) {
-        videoThread = std::thread([this, &session] {
-            uint32_t grabFail = 0, frameCount = 0, lastStatMs = nowMs();
-            while (session.alive.load() && running_.load()) {
-                const uint8_t* data = nullptr; size_t size = 0;
-                if (camera_.grabFrame(&data, &size, /*timeoutMs=*/1000)) {
-                    grabFail = 0;
-                    if (size > 0) { session.pushVideo(data, size); ++frameCount; }
-                } else if (++grabFail >= 5) {
-                    LOG_WARN("连续取帧失败，疑似摄像头掉线，转为仅传感器/状态模式（保持连接）");
-                    break;   // 退出视频线程；其余数据照常，连接不断
+    std::thread videoThread([this,&session] {
+        uint32_t retry=0, failures=0;
+        while(session.alive.load() && running_.load()) {
+            if(!camera_.isOpen()) {
+                uint32_t now=nowMs();
+                if(retry && now-retry<2000) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }
+                retry=now;
+                if(!camera_.open(cfg_.device,cfg_.width,cfg_.height,cfg_.fps) || !camera_.startStreaming()) {
+                    camera_.close(); continue;
                 }
-                uint32_t t = nowMs();
-                if (t - lastStatMs >= 5000) {
-                    LOG_INFO("推流: %.1f fps  %dx%d", frameCount / 5.0,
-                             camera_.width(), camera_.height());
-                    frameCount = 0; lastStatMs = t;
-                }
+                failures=0;
             }
-        });
-    }
+            const uint8_t* data=nullptr; size_t size=0;
+            if(camera_.grabFrame(&data,&size,250)) {
+                failures=0; if(size) session.pushVideo(data,size);
+            } else if(++failures>=5) {
+                camera_.close(); retry=nowMs();
+            }
+        }
+        camera_.close(); // only this thread operates camera during a session
+    });
 
     // ---- 上报线程：按节拍把 传感器/状态/热成像 投递到发送队列。----
     std::thread reportThread([this, &session] {
@@ -411,6 +428,8 @@ void Application::serveClient(int clientFd) {
                 net::SensorData s; robot_.fillSensorData(s);
                 auto pl = net::packSensor(s);
                 session.pushSmall(net::FRAME_SENSOR, pl.data(), pl.size());
+                auto status=robot_.deviceStatus();
+                session.pushSmall(net::FRAME_DEVICE_STATUS,status.data(),status.size());
             }
             if (t - lastStatus >= 2000) {         // 0.5Hz 状态行
                 lastStatus = t;
@@ -419,8 +438,8 @@ void Application::serveClient(int clientFd) {
                                   reinterpret_cast<const uint8_t*>(line.data()), line.size());
             }
             {                                     // 热成像(有新帧就投)
-                int c = 0, r = 0;
-                if (robot_.takeThermal(thermalBuf, c, r) && c > 0 && r > 0) {
+                int c = 0, r = 0; uint32_t generation=0;
+                if (robot_.takeThermal(thermalBuf, c, r, &generation) && c > 0 && r > 0) {
                     std::vector<uint8_t> pl;
                     pl.reserve(4 + thermalBuf.size() * 2);
                     pl.push_back(static_cast<uint8_t>(c & 0xFF));
@@ -432,7 +451,7 @@ void Application::serveClient(int clientFd) {
                         pl.push_back(static_cast<uint8_t>(u & 0xFF));
                         pl.push_back(static_cast<uint8_t>((u >> 8) & 0xFF));
                     }
-                    session.pushSmall(net::FRAME_THERMAL, pl.data(), pl.size());
+                    session.pushSmall(net::FRAME_THERMAL, pl.data(), pl.size(),generation);
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -454,6 +473,11 @@ void Application::serveClient(int clientFd) {
             for (const auto& c : cmds) {
                 LOG_INFO("下行命令: %s (0x%02X value=%u)", cmdName(c.cmdId), c.cmdId, c.value);
                 robot_.handleCommand(c);
+                if(c.cmdId==net::CMD_SPEED && c.value<=19) {
+                    bool saved=saveSpeed(cfg_.runtimeSpeedPath,100+100*c.value);
+                    robot_.setSpeedPersisted(saved);
+                    if(!saved) LOG_WARN("速度已请求，但持久化失败: %s",cfg_.runtimeSpeedPath.c_str());
+                }
             }
             for (const auto& d : drives) robot_.driveManual(d.speed, d.steering);
             for (const auto& v : visions) robot_.setVision(v);
@@ -469,7 +493,7 @@ void Application::serveClient(int clientFd) {
     rxThread.join();
     txThread.join();
 
-    if (haveCam) camera_.stopStreaming();
+
 }
 
 } // namespace patrol

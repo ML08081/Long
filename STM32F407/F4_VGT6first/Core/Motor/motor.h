@@ -24,22 +24,16 @@ extern "C" {
  *    但建议同时把 CubeMX 里 TIM1 的 Prescaler 也改成 7，保持配置一致。 */
 #define MOTOR_PWM_PRESCALER   7
 
-/* ===== 死区补偿 =============================================================
- *  电机存在静摩擦与驱动器导通阈值：占空比低于某个值时只发热不转动。
- *  PID 在这个区间里会"看不到响应"而持续累积，表现为低速档完全推不动，
- *  一旦越过阈值又突然窜出去 —— 也就是"只有高速档才顺、低速卡死"。
- *  补偿办法：非零指令一律抬到至少 MOTOR_MIN_DUTY，让每一个指令都真的产生动作。
- *  ⚠️ MOTOR_MIN_DUTY 必须实测标定：从 0 缓慢加大 PWM，记下车轮（带配重、落地）
- *     刚好开始持续转动的那个值，再往上留 10% 余量。 */
-#define MOTOR_MIN_DUTY      200     /* 最小有效占空比，需实测标定 */
-#define MOTOR_DEADZONE       15     /* 小于此值视为停车，防止零位附近抖动 */
-
-/* ===== 输出斜坡限幅 =========================================================
- *  前进/后退切换或急打方向时，PWM 从 +N 直接跳到 -N 会造成电流冲击、
- *  机械顿挫、以及电源轨瞬间塌陷（本项目供电本就紧张）。
- *  限制每个控制周期(17ms)的最大变化量，把突变摊成斜坡。
- *  300/周期 => 从 0 到满速约 6 个周期 ≈ 100ms，既跟手又不冲击。 */
-#define MOTOR_SLEW_PER_TICK 300
+/* PWM output is distinct from the requested encoder speed (CPS).
+ * Preserve small continuous outputs; never boost a low gear to PWM=200.
+ * Hardware duty is capped at 50%, with an additional 8-unit/loop limiter.
+ * The controller limits acceleration to 150 PWM units/s and may coast faster.
+ * Zero bypasses the ramp for immediate stop.
+ */
+#define MOTOR_MIN_DUTY 0
+#define MOTOR_DEADZONE 0
+#define MOTOR_MAX_DUTY 500
+#define MOTOR_SLEW_PER_TICK 8
 
 // 函数声明
 void Motor_Init(void);              /* 设置 PWM 载波频率，须在 MX_TIM1_Init 之后调用 */

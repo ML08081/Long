@@ -8,7 +8,7 @@ BIN="${PATROL_BIN:-/usr/bin/patrol_system}"
 CONFIG="${PATROL_CONFIG:-/etc/patrol/config.json}"
 CAM_DEV="${PATROL_CAM:-/dev/video0}"
 LOG_DIR="${PATROL_LOG_DIR:-/var/log/patrol}"
-WAIT_CAMERA_SEC="${PATROL_WAIT_CAMERA_SEC:-3}"
+WAIT_CAMERA_SEC="${PATROL_WAIT_CAMERA_SEC:-0}"
 
 mkdir -p "$LOG_DIR"
 

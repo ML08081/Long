@@ -7,11 +7,15 @@
   *     （与 USART3_ProcessRxByte 同构）——只换「帧从哪来」�?  *   · 发送非阻塞：写完邮箱即返回，无 USART3 �?TXE/TC 忙等死锁风险�?  ******************************************************************************
   */
 #include "can_link.h"
+#include "runtime_control.h"
 #include "can.h"        /* hcan1                     */
 #include "usart.h"      /* g_remote_data / g_remote_ready / ControlData (via protocol.h) */
 #include "watchdog.h"   /* CAN 持续异常上报给看门狗 */
 
 #include <string.h>
+
+volatile uint8_t g_remote_vision_alarm = 0;
+volatile uint32_t g_remote_vision_ms = 0;
 
 #ifndef PID_TUNING_ENABLED
 #define PID_TUNING_ENABLED 0
@@ -414,12 +418,15 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
         {
         case COBID_CMD:                 /* 0x201：命令帧（兼心跳源） */
             /* payload(大端)：spd i16 | str i16 | mode u8，DLC=5�?               直写 g_remote_data/g_remote_ready —�?MotionControlTask �?               taskENTER_CRITICAL 内读取（临界区屏�?≥prio5 中断，无撕裂）�?*/
-            if (rh.DLC >= 5U)
+            if (rh.DLC >= 5U && d[4] <= 3U)
             {
                 ControlData c;
                 c.speed    = (int16_t)(((uint16_t)d[0] << 8) | d[1]);
                 c.steering = (int16_t)(((uint16_t)d[2] << 8) | d[3]);
                 c.mode     = d[4];
+                g_remote_vision_alarm = (rh.DLC >= 6U && d[5] <= 2U) ? d[5] : 0U;
+                g_remote_vision_ms=HAL_GetTick();
+                Runtime_LegacyVision(g_remote_vision_alarm);
                 g_remote_data  = c;
                 g_remote_ready = 1;
                 g_can_rx_cmd_cnt++;
@@ -429,7 +436,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
         case COBID_PATROL_CMD:
             if (rh.DLC >= 1U)
             {
-                if (d[0] == PATROL_SUB_PIDTEST) {
+                if (d[0] == 0x05U && rh.DLC == 8U) {
+                    Runtime_ThermalRequest(d[1],d[2],d[3],d[4],d[5]);
+                } else if (d[0] == 0x06U && rh.DLC == 3U) {
+                    Runtime_SpeedRequest(d[1],d[2]);
+                } else if (d[0] == PATROL_SUB_PIDTEST) {
                     CANLink_HandlePidTest(d, rh.DLC);
                 }
                 else if (d[0] == PATROL_SUB_CMD && rh.DLC >= 2U) {

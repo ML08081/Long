@@ -31,11 +31,17 @@ public:
         uint32_t rawFrames   = 0;   // 组装完成的原始帧数
         uint32_t eeFrames    = 0;   // 组装完成的 EEPROM 份数
         uint32_t crcDrop     = 0;   // 因 XOR 校验失败被丢弃的分块数
+        uint32_t malformed   = 0;   // idx/cnt 越界或长度不符合协议
         uint8_t  rawMaxIdx   = 0;   // 见过的最大分块序号（判断尾块是否缺失的关键）
         uint8_t  rawLastIdx  = 0;   // 最近一个分块序号
         uint32_t rawIncomplete = 0; // 新一帧开始(idx=0)时上一帧仍未凑齐的次数
+        uint32_t eeIncomplete  = 0; // EEPROM 新一轮开始时上一轮仍缺块
     };
     ThermalDiag thermalDiag() const { return tdiag_; }
+
+    using RuntimeCallback = std::function<void(const uint8_t*, size_t)>;
+    void setRuntimeCallback(RuntimeCallback cb) { runtimeCb_=std::move(cb); }
+    void resetThermalAssembly(); // owner thread only
 
     SerialManager() = default;
     ~SerialManager();
@@ -53,7 +59,7 @@ public:
     void setRawThermalCallback(RawThermalCallback cb) { rawThermalCb_ = std::move(cb); }
     void setEepromCallback(EepromCallback cb) { eepromCb_ = std::move(cb); }
 
-    // 发送命令帧（龙芯 -> F4）。speed/steering 会被限幅到 [-1000,1000]。
+    // 发送命令帧（龙芯 -> F4）。speed 限幅到 [-2000,2000]，steering 限幅到 [-1000,1000]。
     bool sendCommand(int16_t speed, int16_t steering, uint8_t mode);
 
     // 发送任意已打包协议帧（调用方须保证只在控制线程使用）
@@ -63,6 +69,7 @@ public:
     void poll();
 
 private:
+    RuntimeCallback runtimeCb_;
     int                     fd_ = -1;
     TelemetryCallback       cb_;
     ThermalCallback         thermalCb_;
@@ -78,6 +85,8 @@ private:
     //   旧实现只在"本块末字触达总长"时触发，尾块一旦丢失整帧就永远不完成且无迹可寻。
     uint32_t                rawMask_ = 0;
     bool                    rawFired_ = false;
+    uint32_t                eeMask_ = 0;
+    bool                    eeFired_ = false;
     ThermalDiag             tdiag_{};
 };
 

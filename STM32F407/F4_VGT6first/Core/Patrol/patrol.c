@@ -5,17 +5,20 @@
   ******************************************************************************
   */
 #include "patrol.h"
+#include "runtime_control.h"
 #include "linetrack.h"
 #include "hc.h"          /* HC_NO_TARGET_CM */
 #include "cmsis_os.h"    /* osKernelGetTickCount */
+#include "stm32f4xx_hal.h"
 
 /* ==== 可调参数（实车整定；上限见实施方案 §2.7 标定表）==== */
-#define PATROL_SPEED        300     /* 巡航基速(直行) (-1000..1000)，先低速调试 */
-#define PATROL_MIN_SPEED    140     /* 速度下限：转弯/近障时不低于此(太低电机推不动/爬行) */
-#define PATROL_TURN_SPEED   220     /* 路口通过/找线时的创速 */
+#define PATROL_SPEED        Runtime_Speed()     /* 巡航基速(直行) (100..2000 档位)，先低速调试 */
+#define PATROL_MIN_SPEED    ((PATROL_SPEED < 140U) ? PATROL_SPEED : 140U)     /* 速度下限：转弯/近障时不低于此(太低电机推不动/爬行) */
+#define PATROL_TURN_SPEED   ((PATROL_SPEED < 220U) ? PATROL_SPEED : 220U)     /* 路口通过/找线时的创速 */
 #define STEER_GAIN          350     /* 线位置误差(-2..2) → 转向量 */
 #define LOST_TIMEOUT_MS     800     /* 丢线超过此时长判定丢线停车 */
-#define TICK_MS             17      /* 与 MotionControlTask osDelay(17) 一致 */
+#define JUNCTION_CONFIRM_MS 50U     /* 连续全压线后才认点，抑制宽带毛刺 */
+#define POINT_EXIT_TIMEOUT_MS 3000U /* 放行后未离开色块/未找回线必须停车 */
 
 /* ---- 距离-速度配比（前向避障，Tier0 本地反射，不等龙芯）----
    三档：净空全速 → 减速区线性降 → 停障区停车。阈值/速度均可实车整定。 */
@@ -28,7 +31,13 @@
 #define TURN_SLOWDOWN_ON    1
 
 static PatrolStateT s_st         = PATROL_ST_IDLE;
-static uint32_t     s_lost_acc   = 0;      /* 丢线累计时长(ms) */
+static uint32_t     s_lost_since = 0;
+static uint8_t      s_lost_pending;
+static uint8_t      s_seen_line;
+static int16_t      s_last_steer;
+static uint32_t     s_junction_since;
+static uint8_t      s_junction_pending;
+static uint32_t     s_turn_since;
 static uint8_t      s_point_seq  = 0;      /* 路口计数 */
 static uint8_t      s_left_junc  = 1;      /* 1=已离开上一个路口，可再次触发（防重复计数） */
 static uint8_t      s_action     = PATROL_ACT_STRAIGHT;  /* 龙芯放行时给的动作 */
@@ -39,20 +48,28 @@ static uint8_t      s_turning    = 0;      /* 正在执行路口转向 */
 void Patrol_Init(void)
 {
     s_st = PATROL_ST_IDLE;
-    s_lost_acc = 0; s_point_seq = 0; s_left_junc = 1;
+    s_lost_pending = 0; s_seen_line = 0; s_last_steer = 0;
+    s_junction_pending = 0; s_point_seq = 0; s_left_junc = 1;
     s_action = PATROL_ACT_STRAIGHT; s_turning = 0;
 }
 
 void Patrol_Start(void)
 {
-    LineTrack_Init();
+    /* 传感器持续采样，开始巡检不能重置三路滤波/标定状态。 */
     s_st = PATROL_ST_FOLLOW;
-    s_lost_acc = 0; s_point_seq = 0; s_left_junc = 1; s_turning = 0;
+    s_lost_pending = 0; s_seen_line = 0; s_last_steer = 0;
+    s_junction_pending = 0; s_point_seq = 0; s_left_junc = 1; s_turning = 0;
 }
 
 void Patrol_Stop(void)   { s_st = PATROL_ST_IDLE;  s_turning = 0; }
 void Patrol_Pause(void)  { if (Patrol_IsActive()) s_st = PATROL_ST_HOLD; }
-void Patrol_Resume(void) { if (s_st == PATROL_ST_HOLD) s_st = PATROL_ST_FOLLOW; }
+void Patrol_Resume(void) {
+    if (s_st == PATROL_ST_HOLD) {
+        s_st = PATROL_ST_FOLLOW;
+        s_lost_pending = 0; s_junction_pending = 0;
+        if (s_turning) s_turn_since = HAL_GetTick();
+    }
+}
 
 void Patrol_ResumeFromPoint(uint8_t action)
 {
@@ -63,6 +80,8 @@ void Patrol_ResumeFromPoint(uint8_t action)
     } else {
         /* 直行也要先"穿过"当前路口色块，故统一进转向态，由 TCRT 重新压线判定完成 */
         s_turning = 1;
+        s_turn_since = HAL_GetTick();
+        s_lost_pending = 0; s_junction_pending = 0;
         s_st = PATROL_ST_FOLLOW;
     }
 }
@@ -80,7 +99,11 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
 
     if (s_st == PATROL_ST_IDLE) return PATROL_EV_NONE;
 
+    if (s_st == PATROL_ST_HOLD || s_st == PATROL_ST_ARRIVE) return PATROL_EV_NONE;
     LineState ls = LineTrack_Read();
+    uint32_t now = HAL_GetTick();
+    /* 未取得三路黑白有效跨度时停车，不能带着占位阈值盲走。 */
+    if (!LineTrack_IsCalibrated()) return PATROL_EV_NONE;
 
     /* ---- Tier0 安全反射：前向停障优先于一切循线动作 ----
        front_cm==HC_NO_TARGET_CM 表示无目标(空旷)，不可当成 0cm 贴脸。 */
@@ -103,9 +126,9 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
     case PATROL_ST_LOST:
         /* 丢线停车后：一旦重新看到线(任一探头压线)，自动恢复循线。
            （原为终态；台架联调/实车重新上线都需要它能自愈） */
-        if (!LineTrack_IsLost(ls)) {
+        if (!LineTrack_IsLost(ls) && !LineTrack_IsJunction(ls)) {
             s_st = PATROL_ST_FOLLOW;
-            s_lost_acc = 0;
+            s_lost_pending = 0;
         }
         return PATROL_EV_NONE;
 
@@ -115,6 +138,29 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
 
     case PATROL_ST_FOLLOW:
     {
+        /* 路口转向原来绕过丢线保护，可永久找线；限制整个离点阶段。 */
+        if (s_turning && now - s_turn_since >= POINT_EXIT_TIMEOUT_MS) {
+            s_turning = 0; s_st = PATROL_ST_LOST;
+            return PATROL_EV_LINE_LOST;
+        }
+        if (LineTrack_IsLost(ls)) {
+            s_junction_pending = 0;
+            if (!s_lost_pending) { s_lost_since = now; s_lost_pending = 1; }
+            if (now - s_lost_since >= LOST_TIMEOUT_MS) {
+                s_turning = 0; s_st = PATROL_ST_LOST;
+                return PATROL_EV_LINE_LOST;
+            }
+            /* 首次从未见线时保持停车，不能盲目前进寻找未知线路。 */
+            if (s_seen_line) {
+                *out_speed = PATROL_TURN_SPEED;
+                *out_steer = s_turning
+                    ? ((s_action == PATROL_ACT_LEFT) ? -1000
+                       : (s_action == PATROL_ACT_RIGHT) ? 1000 : 0)
+                    : s_last_steer;
+            }
+            return PATROL_EV_NONE;
+        }
+        s_lost_pending = 0;
         /* ---- 路口检测（三路全压线）---- */
         if (LineTrack_IsJunction(ls))
         {
@@ -125,6 +171,13 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
                 return PATROL_EV_NONE;
             }
             if (s_left_junc) {
+                /* 未看见过普通线路时全亮不能区分路口/底色，停车待定位。 */
+                if (!s_seen_line) return PATROL_EV_NONE;
+                if (!s_junction_pending) {
+                    s_junction_since = now; s_junction_pending = 1;
+                }
+                if (now - s_junction_since < JUNCTION_CONFIRM_MS) return PATROL_EV_NONE;
+                s_junction_pending = 0;
                 s_left_junc = 0;
                 s_point_seq++;
                 s_st = PATROL_ST_ARRIVE;   /* 停车，等龙芯认点(ArUco)+下发动作 */
@@ -133,6 +186,9 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
             *out_speed = PATROL_TURN_SPEED;
             return PATROL_EV_NONE;
         }
+
+        s_junction_pending = 0;
+        s_seen_line = 1;
 
         /* 已离开路口色块 */
         if (s_turning) {
@@ -147,23 +203,9 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
         }
         s_left_junc = 1;
 
-        /* ---- 丢线保护 ---- */
-        if (LineTrack_IsLost(ls))
-        {
-            s_lost_acc += TICK_MS;
-            if (s_lost_acc >= LOST_TIMEOUT_MS) {
-                s_st = PATROL_ST_LOST;
-                return PATROL_EV_LINE_LOST;
-            }
-            /* 短暂丢线：低速直行尝试重新找到线 */
-            *out_speed = PATROL_TURN_SPEED;
-            *out_steer = 0;
-            return PATROL_EV_NONE;
-        }
-        s_lost_acc = 0;
-
         /* ---- 正常循线：误差 → 转向（阿克曼下 steer 只驱动舵机）---- */
         int16_t steer = (int16_t)(LineTrack_Error(ls) * STEER_GAIN);
+        s_last_steer = steer;
         *out_steer = steer;
 
         /* ===== 速度配比（两级调制：转弯程度 + 障碍距离，取更小者）===== */
@@ -193,7 +235,7 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
 
         /* 取两级里更小的速度；非 0 时不低于 MIN（避免爬行推不动） */
         int32_t v = (vdist < base) ? vdist : base;
-        if (v > 0 && v < PATROL_MIN_SPEED) v = PATROL_MIN_SPEED;
+        /* Obstacle deceleration may be below a configuration gear; never raise it. */
         *out_speed = (int16_t)v;
         return PATROL_EV_NONE;
     }

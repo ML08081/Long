@@ -39,44 +39,64 @@ static uint8_t  s_present = 0;
 static uint8_t  s_continuous = 0;
 static uint8_t  s_stop_variable = 0;
 static uint32_t s_meas_timing_budget_us = 0;
+static uint8_t s_io_error = 0;
+static uint32_t s_last_range_ms = 0;
+
+/* 一次失败即停止本轮后续事务；由任务按时间退避恢复，避免故障总线反复
+   消耗高优先级任务。读失败绝不能用清零的缓冲区冒充 0mm 成功读数。 */
+static HAL_StatusTypeDef io_result(HAL_StatusTypeDef status)
+{
+    if (status != HAL_OK) {
+        s_io_error = 1;
+        s_present = 0;
+        s_continuous = 0;
+    }
+    return status;
+}
 
 /*========================= I2C 基础读写 =========================*/
 static HAL_StatusTypeDef wr8(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, buf, 2, 10);
+    if (s_io_error) return HAL_ERROR;
+    return io_result(HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, buf, 2, 10));
 }
 static uint8_t rd8(uint8_t reg)
 {
     uint8_t v = 0;
-    HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, &reg, 1, 10);
-    HAL_I2C_Master_Receive(&hi2c2, VL53_I2C_ADDR_8BIT, &v, 1, 10);
+    if (s_io_error) return 0;
+    if (io_result(HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, &reg, 1, 10)) != HAL_OK) return 0;
+    if (io_result(HAL_I2C_Master_Receive(&hi2c2, VL53_I2C_ADDR_8BIT, &v, 1, 10)) != HAL_OK) return 0;
     return v;
 }
 static HAL_StatusTypeDef wr16(uint8_t reg, uint16_t val)
 {
     uint8_t buf[3] = { reg, (uint8_t)(val >> 8), (uint8_t)(val & 0xFF) };
-    return HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, buf, 3, 10);
+    if (s_io_error) return HAL_ERROR;
+    return io_result(HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, buf, 3, 10));
 }
 static uint16_t rd16(uint8_t reg)
 {
     uint8_t v[2] = {0};
-    HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, &reg, 1, 10);
-    HAL_I2C_Master_Receive(&hi2c2, VL53_I2C_ADDR_8BIT, v, 2, 10);
+    if (s_io_error) return 0;
+    if (io_result(HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, &reg, 1, 10)) != HAL_OK) return 0;
+    if (io_result(HAL_I2C_Master_Receive(&hi2c2, VL53_I2C_ADDR_8BIT, v, 2, 10)) != HAL_OK) return 0;
     return (uint16_t)((v[0] << 8) | v[1]);
 }
 static HAL_StatusTypeDef wr_multi(uint8_t reg, const uint8_t *src, uint8_t n)
 {
     uint8_t buf[8];
+    if (s_io_error) return HAL_ERROR;
     if (n > 7) n = 7;
     buf[0] = reg;
     for (uint8_t i = 0; i < n; i++) buf[1 + i] = src[i];
-    return HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, buf, (uint16_t)(n + 1), 20);
+    return io_result(HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, buf, (uint16_t)(n + 1), 20));
 }
 static void rd_multi(uint8_t reg, uint8_t *dst, uint8_t n)
 {
-    HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, &reg, 1, 10);
-    HAL_I2C_Master_Receive(&hi2c2, VL53_I2C_ADDR_8BIT, dst, n, 20);
+    if (s_io_error) return;
+    if (io_result(HAL_I2C_Master_Transmit(&hi2c2, VL53_I2C_ADDR_8BIT, &reg, 1, 10)) != HAL_OK) return;
+    io_result(HAL_I2C_Master_Receive(&hi2c2, VL53_I2C_ADDR_8BIT, dst, n, 20));
 }
 
 /*========================= 超时编解码宏 =========================*/
@@ -200,7 +220,7 @@ static uint8_t getSpadInfo(uint8_t *count, uint8_t *type_is_aperture)
     wr8(0x94, 0x6b); wr8(0x83, 0x00);
 
     uint32_t start = HAL_GetTick();
-    while (rd8(0x83) == 0x00) { if (HAL_GetTick() - start > 50) return 0; }
+    while (rd8(0x83) == 0x00) { if (s_io_error || HAL_GetTick() - start > 50) return 0; }
     wr8(0x83, 0x01);
     tmp = rd8(0x92);
     *count = tmp & 0x7f;
@@ -220,7 +240,7 @@ static uint8_t performSingleRefCalibration(uint8_t vhv_init_byte)
     uint32_t start = HAL_GetTick();
     while ((rd8(REG_RESULT_INTERRUPT_STATUS) & 0x07) == 0)
     {
-        if (HAL_GetTick() - start > 100) return 0;
+        if (s_io_error || HAL_GetTick() - start > 100) return 0;
     }
     wr8(REG_SYSTEM_INTERRUPT_CLEAR, 0x01);
     wr8(REG_SYSRANGE_START, 0x00);
@@ -231,6 +251,8 @@ static uint8_t performSingleRefCalibration(uint8_t vhv_init_byte)
 int VL53_Init(void)
 {
     s_present = 0;
+    s_continuous = 0;
+    s_io_error = 0;
 
     /* ---- 上电：XSHUT 拉高，等待启动 ---- */
     HAL_GPIO_WritePin(VL53_XSHUT_GPIO_Port, VL53_XSHUT_Pin, GPIO_PIN_RESET);
@@ -257,7 +279,7 @@ int VL53_Init(void)
     uint8_t spad_count = 0, spad_type_is_aperture = 0;
     if (!getSpadInfo(&spad_count, &spad_type_is_aperture)) return -2;
 
-    uint8_t ref_spad_map[6];
+    uint8_t ref_spad_map[6] = {0};
     rd_multi(REG_GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
 
     wr8(0xFF, 0x01);
@@ -313,11 +335,13 @@ int VL53_Init(void)
     if (!performSingleRefCalibration(0x00)) return -4;
     wr8(REG_SYSTEM_SEQUENCE_CONFIG, 0xE8);
 
+    if (s_io_error) return -5;
     s_present = 1;
+    s_last_range_ms = HAL_GetTick();
 
     /* 初始化完成后进入连续测距(back-to-back)模式 */
     VL53_StartContinuous();
-    return 0;
+    return s_io_error ? -6 : 0;
 }
 
 uint8_t VL53_IsPresent(void) { return s_present; }
@@ -329,6 +353,7 @@ uint8_t VL53_IsPresent(void) { return s_present; }
    raw_id 回填读到的 ID 字节，便于日志判读。 */
 uint8_t VL53_BusProbe(uint8_t *raw_id)
 {
+    s_io_error = 0;
     /* 先拉高 XSHUT 并等待启动——否则芯片处于关断态，探测必然无 ACK(假阴性)。
        这样 id 读数才可信：真无 ACK = 接线/供电/上拉问题，而非 XSHUT 时序。 */
     HAL_GPIO_WritePin(VL53_XSHUT_GPIO_Port, VL53_XSHUT_Pin, GPIO_PIN_SET);
@@ -355,7 +380,7 @@ void VL53_StartContinuous(void)
     /* SYSRANGE_START = 0x02：连续背靠背模式（inter-measurement period=0）。
        传感器此后持续测量，读取端只需取最新结果并清中断，无需每次重启测量。 */
     wr8(REG_SYSRANGE_START, 0x02);
-    s_continuous = 1;
+    s_continuous = s_io_error ? 0U : 1U;
 }
 
 /*========================= 读取测距结果 =========================*/
@@ -370,11 +395,13 @@ uint16_t VL53_ReadRange_mm(void)
     uint32_t start = HAL_GetTick();
     while ((rd8(REG_RESULT_INTERRUPT_STATUS) & 0x07) == 0)
     {
-        if (HAL_GetTick() - start > 100) return VL53_OUT_OF_RANGE;
+        if (s_io_error || HAL_GetTick() - start > 100) return VL53_OUT_OF_RANGE;
     }
 
     uint16_t range = rd16(REG_RESULT_RANGE_STATUS + 10);  /* 0x1E */
     wr8(REG_SYSTEM_INTERRUPT_CLEAR, 0x01);   /* 清中断，允许下一帧结果 */
+    if (s_io_error) return VL53_OUT_OF_RANGE;
+    s_last_range_ms = HAL_GetTick();
 
     /* VL53L0X 无回波时返回 8190/8191，统一映射到 OUT_OF_RANGE */
     if (range >= 8190) return VL53_OUT_OF_RANGE;
@@ -383,15 +410,22 @@ uint16_t VL53_ReadRange_mm(void)
 
 uint8_t VL53_TryReadRange_mm(uint16_t *out_mm)
 {
-    if (!s_present) return 0;
+    if (!s_present || !out_mm) return 0;
     if (!s_continuous) VL53_StartContinuous();
 
     /* 只查一次就绪位（单次 I2C 读 <1ms），未就绪立即返回——不忙等 */
-    if ((rd8(REG_RESULT_INTERRUPT_STATUS) & 0x07) == 0)
+    if ((rd8(REG_RESULT_INTERRUPT_STATUS) & 0x07) == 0) {
+        if (HAL_GetTick() - s_last_range_ms > 250U) {
+            s_present = 0;
+            s_continuous = 0;
+        }
         return 0;
+    }
 
     uint16_t range = rd16(REG_RESULT_RANGE_STATUS + 10);  /* 0x1E */
     wr8(REG_SYSTEM_INTERRUPT_CLEAR, 0x01);
+    if (s_io_error) return 0;
+    s_last_range_ms = HAL_GetTick();
     *out_mm = (range >= 8190) ? VL53_OUT_OF_RANGE : range;
     return 1;
 }

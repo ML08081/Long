@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include <QSpinBox>
+#include <QSignalBlocker>
 #include "remotepanel.h"
 
 #include <QWidget>
@@ -49,7 +51,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     // 视觉识别边车（预留接口，默认关闭）。模型/解释器可在此处切换。
     m_vision = new VisionProcessor(this);
-    // m_vision->setModelPath("F:/projectForXN/NGFXM/best.pt");  // 换模型改这里即可
+    m_vision->setModelPath("F:/projectForXN/NGFXM/YOLO模型/fire_smoke_yolov8n.pt");
     connect(m_vision, &VisionProcessor::detections,   this, &MainWindow::onVisionDetections);
     connect(m_vision, &VisionProcessor::statusChanged, this, &MainWindow::onVisionStatus);
     connect(m_vision, &VisionProcessor::logMessage,   this, &MainWindow::onLog);
@@ -114,16 +116,17 @@ QWidget *MainWindow::buildTopBar()
     lay->addWidget(new QLabel("开发板:"));
     m_cmbPreset = new QComboBox();
     m_cmbPreset->addItem("预设地址…",      QString());
-    m_cmbPreset->addItem("龙芯 B410",      QStringLiteral("192.168.3.100"));
+    m_cmbPreset->addItem("手机热点 MLML（自动发现）", QString());
     m_cmbPreset->addItem("本机 localhost", QStringLiteral("127.0.0.1"));
     m_cmbPreset->setFixedWidth(140);
-    m_cmbPreset->setToolTip("选择开发板预设 IP（龙芯 / 本机），或直接在右侧手动输入");
+    m_cmbPreset->setToolTip("电脑与龙芯连接 MLML 后自动发现；手机热点分配的地址可能变化，也可手动填写龙芯 IP");
     lay->addWidget(m_cmbPreset);
     connect(m_cmbPreset, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
             this, &MainWindow::onPresetChanged);
 
     lay->addWidget(new QLabel("IP:"));
-    m_editIp = new QLineEdit("192.168.3.172");
+    m_editIp = new QLineEdit();
+    m_editIp->setPlaceholderText("自动发现或填写龙芯IP");
     m_editIp->setFixedWidth(140);
     lay->addWidget(m_editIp);
     lay->addWidget(new QLabel("端口:"));
@@ -148,7 +151,7 @@ QWidget *MainWindow::buildTopBar()
     lay->addWidget(m_lblConnStatus);
 
     // 自动发现指示：局域网内发现龙芯广播即显示其 IP/版本（IP 变了也能看见）
-    m_lblDiscovered = new QLabel("🔍 未发现开发板");
+    m_lblDiscovered = new QLabel("未发现开发板");
     m_lblDiscovered->setObjectName("Discovered");
     lay->addSpacing(12);
     lay->addWidget(m_lblDiscovered);
@@ -185,10 +188,8 @@ QWidget *MainWindow::buildLeftColumn()
     Card *mot = new Card("运动状态");
     m_valEnc1    = mot->addValue("编码器1", "—");
     m_valEnc2    = mot->addValue("编码器2", "—");
-    m_valSpeedL  = mot->addValue("左轮速度", "—");
-    m_valSpeedR  = mot->addValue("右轮速度", "—");
-    m_valServo   = mot->addValue("转向舵机", "— us");
-    m_valVoltage = mot->addValue("电池电压", "— V");
+    m_valSpeedL  = mot->addValue("左轮（脉冲/s）", "—");
+    m_valSpeedR  = mot->addValue("右轮（脉冲/s）", "—");
     m_valMode    = mot->addValue("工作模式", "—");
     m_valFault   = mot->addValue("故障标志", "—");
     v->addWidget(mot);
@@ -244,7 +245,15 @@ QWidget *MainWindow::buildVideoCard()
 QWidget *MainWindow::buildThermalCard()
 {
     Card *c = new Card("热成像（红外测温 MLX90640）");
-    m_thermalView = new ImageView("等待热成像...\nF4 经龙芯下发 0x20 温度帧");
+    m_cmbThermal=new QComboBox;
+    m_cmbThermal->addItems({"自动（开机预览三分钟）","手动开启预览","关闭预览（报警仍开启）"});
+    c->body()->addWidget(m_cmbThermal);
+    m_thermalStatus=new QLabel("等待设备确认");
+    m_thermalStatus->setWordWrap(true); c->body()->addWidget(m_thermalStatus);
+    connect(m_cmbThermal,qOverload<int>(&QComboBox::activated),this,[this](int value) {
+        if(m_net->requestThermal(value)) m_thermalStatus->setText("启停请求已发出，等待设备确认");
+    });
+    m_thermalView = new ImageView("等待实时温度图像...");
     c->body()->addWidget(m_thermalView, 1);
     m_lblThermalRange = new QLabel("量程: —");
     m_lblThermalRange->setObjectName("Hint");
@@ -256,7 +265,52 @@ QWidget *MainWindow::buildThermalCard()
 // ─── 执行与联动控制 ──────────────────────────────────────────────
 QWidget *MainWindow::buildControlCard()
 {
-    Card *c = new Card("执行与联动控制（未接入）");
+    Card *c = new Card("运动与联动控制");
+    auto speedRow=new QHBoxLayout;
+    speedRow->addWidget(new QLabel("全模式速度档位"));
+    m_speedSetting=new QSpinBox; m_speedSetting->setRange(100,2000);
+    m_speedSetting->setSingleStep(100); m_speedSetting->setValue(500);
+    m_speedSetting->setKeyboardTracking(false);
+    speedRow->addWidget(m_speedSetting); c->body()->addLayout(speedRow);
+    m_runtimeStatus=new QLabel("默认 500；等待设备确认"); m_runtimeStatus->setWordWrap(true);
+    c->body()->addWidget(m_runtimeStatus);
+    connect(m_speedSetting,qOverload<int>(&QSpinBox::valueChanged),this,[this](int value) {
+        int step=qBound(100,100+((value-100+50)/100)*100,2000);
+        { QSignalBlocker b(m_speedSetting); m_speedSetting->setValue(step); }
+        if(m_net->requestSpeed(step)) m_runtimeStatus->setText("速度请求已发出，等待设备确认");
+        else m_runtimeStatus->setText("未连接：速度请求未发送");
+    });
+    connect(m_net,&NetClient::speedLimitChanged,this,[this](int v) {
+        QSignalBlocker b(m_speedSetting); m_speedSetting->setValue(v);
+    });
+    connect(m_net,&NetClient::deviceStatus,this,[this](const QByteArray& p) {
+        m_lastDeviceMs=QDateTime::currentMSecsSinceEpoch();
+        const auto u=[&](int i){ return quint8(p[i]); };
+        bool confirmed=u(1)!=0; m_thermalState=confirmed ? u(5) : -1;
+        const char* states[]={"已关闭（节能待机）","启动中，等待完整图像","正在采集","设备采集故障"};
+        int reasons=(u(7)<<8)|u(8);
+        QString reason;
+        if(reasons&4) reason+=" 烟雾/气体";
+        if(reasons&8) reason+=" 火焰";
+        if(reasons&16) reason+=" 环境超温";
+        if(reasons&32) reason+=" 视觉火焰";
+        if(reasons&64) reason+=" 视觉烟雾";
+        if(reasons&128) reason+=" 热点超温";
+        if(reasons&256) reason+=" 报警后复核保持";
+        if(reasons&512) reason+=" 等待有效降温核温结果";
+        if(reasons&1) reason+=QString(" 开机预览剩余%1秒").arg(u(9));
+        if(reasons&2) reason+=" 手动预览";
+        bool ack=confirmed && u(11)==u(25) && u(10)==u(3) && u(6)==u(2);
+        m_thermalStatus->setText(confirmed ? QString(states[u(5)])+reason+(ack?"":"（设置待确认）") : "未收到设备状态，请检查 F4 链路或固件支持");
+        { QSignalBlocker b(m_cmbThermal); m_cmbThermal->setCurrentIndex(u(2)); }
+        m_runtimeStatus->setText(QString("请求 %1 / 设备 %2 · %3%4")
+          .arg(100+100*u(3)).arg(confirmed?QString::number(100+100*u(10)):QString("未知"))
+          .arg(ack?"已确认":"待确认").arg(u(26)?"":" · 速度未保存")
+          + QString("\n环境更新 %1秒前 / 温湿度采样 %2秒前")
+            .arg((u(20)|(u(21)<<8))/10.0,0,'f',1).arg(((u(15)<<8)|u(16))/10.0,0,'f',1));
+        m_deviceThermalFresh=u(24)!=0;
+        updateThermalPresentation();
+    });
 
     QGridLayout *g = new QGridLayout();
     g->setHorizontalSpacing(8);
@@ -285,12 +339,12 @@ QWidget *MainWindow::buildControlCard()
     m_cmbMode->addItem("循迹模式（自动巡检）", 1);  // MODE_LINE_ONLY
     m_cmbMode->addItem("循迹 + 视觉模式",    3);  // MODE_LINE_VISION
     m_cmbMode->setToolTip(
-        "遥控模式：完全由上位机下发速度/转向\n"
+        "遥控模式：完全由上位机下发速度/转向；急停后重新选择可恢复控制\n"
         "循迹模式：F4 本地 TCRT 循线自动巡检（断网也能跑）\n"
         "循迹+视觉：循线仍在 F4 本地闭环，龙芯视觉(YOLO/ArUco)作为叠加约束介入");
     modeRow->addWidget(m_cmbMode, 1);
     c->body()->addLayout(modeRow);
-    connect(m_cmbMode, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+    connect(m_cmbMode, static_cast<void(QComboBox::*)(int)>(&QComboBox::activated),
             this, &MainWindow::onModeChanged);
 
     m_btnEstop = new QPushButton("紧急停止");
@@ -378,6 +432,7 @@ void MainWindow::onDisconnectClicked() { m_userClosedLink = true; m_net->disconn
 
 void MainWindow::onConnected()
 {
+    m_lastDeviceMs=QDateTime::currentMSecsSinceEpoch(); m_thermalState=-1;
     m_userClosedLink = false;
     m_autoConnectPending = false;
     setConnectedUi(true);
@@ -403,15 +458,16 @@ void MainWindow::onConnecting(int attempt, int maxAttempts)
 
 void MainWindow::onDisconnected()
 {
+    m_lastDeviceMs=0; m_thermalState=-1;
+    m_thermalStatus->setText("未连接，热成像状态未知");
+    m_runtimeStatus->setText("未连接，速度设置等待确认");
     m_autoConnectPending = false;   // 允许下次发现重新自动连
     setConnectedUi(false);
-    m_videoView->clearImage();
-    m_thermalView->clearImage();
-    m_lblThermalRange->setText("量程: —");
-    setRisk(0);
-    m_lastFrame = QImage();
+    m_deviceThermalFresh=false;
+    updateThermalPresentation();
+    markSensorDisplaysHeld();
+    setRisk(1);
     m_lastDets.clear();
-    m_thermalAccum = QImage();
     // 链路健康复位
     m_lastSensorMs = 0;
     m_remoteRxInit = false;
@@ -424,7 +480,7 @@ void MainWindow::onDisconnected()
 // UDP 自动发现龙芯：IP 变化(如切到手机热点 DHCP)也能自动跟上并连接。
 void MainWindow::onDiscovered(const QString &ip, quint16 port, const QString &version)
 {
-    m_lblDiscovered->setText(QString("🔍 %1 v%2").arg(ip).arg(version));   // 顶栏持续显示最新发现
+    m_lblDiscovered->setText(QString("开发板: %1 v%2").arg(ip).arg(version));   // 顶栏持续显示最新发现
     if (version != m_discoveredVer) {   // 版本变化才打日志，避免每 2s 刷屏
         m_discoveredVer = version;
         onLog(QString("发现开发板 %1:%2（v%3）").arg(ip).arg(port).arg(version));
@@ -492,42 +548,34 @@ void MainWindow::setRisk(quint8 level)
 
 void MainWindow::onSensorUpdated(const LL::SensorData &d)
 {
+    m_sourceFault=d.fault;
     m_sensorCount++;
     m_lastSensorMs = QDateTime::currentMSecsSinceEpoch();   // 链路新鲜度打时间戳
 
-    // 环境（F4 经 0x5C 帧上报：DHT11 温湿度 / MQ2 气体 / VL53L0X 激光）
-    // DHT 有效位未置位 = F4 侧温湿度传感器无读数（并非上位机没刷新）。明确标注为"传感器无数据"，
-    // 避免与"链路断开"混淆——链路断开由下方链路健康区单独提示。
-    if (d.dhtOk()) {
-        m_valTemp->setText(QString("%1 °C").arg(d.temperature_01c / 10.0, 0, 'f', 1));
-        m_valHumi->setText(QString("%1 %").arg(d.humidity_01 / 10.0, 0, 'f', 1));
-        m_valTemp->setStyleSheet("");
-        m_valHumi->setStyleSheet("");
-    } else {
-        m_valTemp->setText("传感器无数据");
-        m_valHumi->setText("传感器无数据");
-        m_valTemp->setStyleSheet("color:#9e9e9e;");
-        m_valHumi->setStyleSheet("color:#9e9e9e;");
-    }
-    // MQ2 原始 ADC 值（0~4095，非真实 ppm）+ 报警提示
-    m_valGas->setText(QString("%1%2").arg(d.gas_ppm)
-                        .arg(d.gasAlarm() ? "  报警" : ""));
-    m_valGas->setStyleSheet(d.gasAlarm() ? "color:#e53935; font-weight:bold;" : "");
-    // 超声波距离：F4 真实数据
-    m_valDistance->setText(d.distance_cm ? QString("%1 cm").arg(d.distance_cm) : "-- cm");
-    // 激光测距（VL53L0X）：F4 真实数据
-    m_valLaser->setText((d.laserOk() && d.laser_cm) ? QString("%1 cm").arg(d.laser_cm) : "-- cm");
+    // Display caches do not set validity flags or participate in alarm decisions.
+    auto showHeld=[](QLabel* label,QString& cached,bool available,bool fresh,const QString& value) {
+        if(available) cached=value;
+        label->setText(cached.isEmpty()?QString("尚无有效样本"):cached+(fresh?"":"（保留）"));
+        label->setStyleSheet(fresh?"":"color:#9e9e9e;");
+    };
+    const bool envFresh=!(d.fault & LL::FAULT_ENV_STALE);
+    const bool dhtFresh=envFresh && d.dhtOk();
+    const bool dhtAvailable=d.dhtOk() || (d.fault & LL::FAULT_DHT_HELD);
+    showHeld(m_valTemp,m_heldValues[0],dhtAvailable,dhtFresh,QString("%1 °C").arg(d.temperature_01c/10.0,0,'f',1));
+    showHeld(m_valHumi,m_heldValues[1],dhtAvailable,dhtFresh,QString("%1 %").arg(d.humidity_01/10.0,0,'f',1));
+    showHeld(m_valGas,m_heldValues[2],envFresh || (d.fault & LL::FAULT_ENV_HELD),envFresh,QString::number(d.gas_ppm));
+    if(envFresh && d.gasAlarm()) { m_valGas->setText(m_heldValues[2]+"  报警"); m_valGas->setStyleSheet("color:#e53935; font-weight:bold;"); }
+    showHeld(m_valDistance,m_heldValues[3],d.distance_cm>0,!(d.fault & LL::FAULT_CORE_STALE) && d.distance_cm>0,QString("%1 cm").arg(d.distance_cm));
+    showHeld(m_valLaser,m_heldValues[4],d.laser_cm>0 && (d.laserOk() || (d.fault & LL::FAULT_LASER_HELD)),envFresh && d.laserOk(),QString("%1 cm").arg(d.laser_cm));
 
     // 运动
     m_valEnc1->setText(QString::number(d.encoder1));
     m_valEnc2->setText(QString::number(d.encoder2));
     m_valSpeedL->setText(QString::number(d.speed_L));
     m_valSpeedR->setText(QString::number(d.speed_R));
-    m_valServo->setText("未接入");
-    m_valVoltage->setText("未接入");
     m_valMode->setText(QString("%1 (%2)").arg(modeName(d.mode)).arg(d.mode));
     // 下拉框回显：让 UI 跟随下位机【真实】模式（可能被龙芯/急停改过），
-    // 用 m_modeSyncing 抑制 currentIndexChanged 再把命令发回去，避免回环。
+    // 仅用户 activated 下发命令；回显改变索引不会重发或意外解除急停。
     {
         const int real = d.mode & 0x7F;
         const int idx  = m_cmbMode->findData(real);
@@ -537,7 +585,19 @@ void MainWindow::onSensorUpdated(const LL::SensorData &d)
             m_modeSyncing = false;
         }
     }
-    if (d.fault == 0) {
+    m_valFault->setToolTip(QString("设备故障标志 0x%1").arg(d.fault, 2, 16, QChar('0')));
+    if (d.fault & LL::FAULT_MOTION) {
+        m_valFault->setText("电机反馈异常，已停机");
+        m_valFault->setStyleSheet("color:#e53935; font-weight:bold;");
+    } else if (d.obsLock()) {
+        m_valFault->setText("避障锁定：松开再前推两次");
+        m_valFault->setToolTip("确认前方净空后，松开前进再前推，重复两次；障碍仍近时无法解锁。");
+        m_valFault->setStyleSheet("color:#ffb020; font-weight:bold;");
+    } else if (d.fault & LL::FAULT_LINE_CALIBRATION) {
+        m_valFault->setText((d.mode==1 || d.mode==3) ? "循迹待标定，已停车" : "循迹待标定（遥控可用）");
+        m_valFault->setToolTip("保持停车，手动横扫线路和底色，让左、中、右探头各自观察到两种表面，再将中探头对准线路。每次重新上电需标定；底色和线路对比不足时请检查探头高度与接线。");
+        m_valFault->setStyleSheet("color:#ffb020; font-weight:bold;");
+    } else if (d.fault == 0) {
         m_valFault->setText("正常");
         m_valFault->setStyleSheet("#Value{}");  // 用默认
         m_valFault->setStyleSheet("color:#43a047;");
@@ -554,10 +614,10 @@ void MainWindow::onSensorUpdated(const LL::SensorData &d)
         l->setStyleSheet(on ? "color:#e53935; font-weight:bold;" : "color:#43a047;");
     };
     // 火焰/气体：F4 传感器（0x5C flags）真实数据；障碍：激光+超声波双重确认
-    setBool(m_valFlame,    d.flame(),    "检测到火焰", "正常");
+    setBool(m_valFlame,    d.flame() || m_visionFireActive,
+            d.flame() ? "火焰传感器报警" : "视觉识别火焰", "正常");
     setBool(m_valGasAlarm, d.gasAlarm(), "气体超阈",   "正常");
-    // "烟雾识别"复用为 F4 障碍确认（VL53+超声波双重验证）
-    setBool(m_valSmoke,    d.obstacle(), "障碍确认",   "无障碍");
+    setBool(m_valSmoke,    m_visionSmokeActive, "视觉识别烟雾", "未识别");
     setRisk(d.risk_level);   // 风险等级：龙芯按超声波距离推导
 
     // 时间戳
@@ -618,6 +678,10 @@ void MainWindow::onVisionToggled(bool on)
     m_vision->setEnabled(on);
     if (!on) {
         m_lastDets.clear();
+        m_visionFireHits = m_visionSmokeHits = 0;
+        m_visionFireMisses = m_visionSmokeMisses = 0;
+        m_visionFireActive = m_visionSmokeActive = false;
+        m_net->sendVision(0, 0, 0, QString());
         refreshVideo();        // 恢复原始画面
     }
     m_lblVision->setText(on ? "视觉: 启动中..." : "视觉: 关闭");
@@ -631,21 +695,55 @@ void MainWindow::onVisionDetections(const QVector<Detection> &dets)
     // 汇总并回传龙芯：龙芯才是"大脑"，由它据此判断（本地仅叠加显示）。
     quint8 flags = 0, maxConf = 0;
     QString topClass;
+    bool fireNow = false, smokeNow = false;
+    int fireConf = 0, smokeConf = 0;
     for (const Detection &d : dets) {
         int c = qBound(0, int(d.conf * 100), 100);
         if (c >= maxConf) { maxConf = quint8(c); topClass = d.cls; }
         const QString cl = d.cls.toLower();
         if (cl.contains("person") || cl.contains("people") || cl.contains("人"))
             flags |= LL::VIS_PERSON;
-        if (cl.contains("fire") || cl.contains("flame") || cl.contains("火"))
-            flags |= LL::VIS_FIRE;
+        if (cl.contains("fire") || cl.contains("flame") || cl.contains("火")) {
+            fireNow = true;
+            fireConf = qMax(fireConf, c);
+        }
+        if (cl.contains("smoke") || cl.contains("烟")) {
+            smokeNow = true;
+            smokeConf = qMax(smokeConf, c);
+        }
     }
+
+    // 连续两帧才报警，避免单帧误报；高置信火焰立即报警。消失后连续
+    // 三帧才解除，避免边缘置信度波动导致蜂鸣器频繁开关。
+    if (fireNow) {
+        m_visionFireHits++;
+        m_visionFireMisses = 0;
+        if (m_visionFireHits >= 2 || fireConf >= 75) m_visionFireActive = true;
+    } else {
+        m_visionFireHits = 0;
+        if (++m_visionFireMisses >= 3) m_visionFireActive = false;
+    }
+    if (smokeNow) {
+        m_visionSmokeHits++;
+        m_visionSmokeMisses = 0;
+        if (m_visionSmokeHits >= 2) m_visionSmokeActive = true;
+    } else {
+        m_visionSmokeHits = 0;
+        if (++m_visionSmokeMisses >= 3) m_visionSmokeActive = false;
+    }
+    if (m_visionFireActive) flags |= LL::VIS_FIRE;
+    if (m_visionSmokeActive) flags |= LL::VIS_SMOKE;
     m_net->sendVision(quint8(qMin(dets.size(), 255)), maxConf, flags, topClass);
 
     m_lblVision->setText(dets.isEmpty()
         ? "视觉: 运行中 · 无目标"
         : QString("视觉: 运行中 · 目标 %1 · %2 %3%")
               .arg(dets.size()).arg(topClass).arg(maxConf));
+
+    m_valFlame->setText(m_visionFireActive ? "视觉识别火焰" : "正常");
+    m_valFlame->setStyleSheet(m_visionFireActive ? "color:#e53935; font-weight:bold;" : "color:#43a047;");
+    m_valSmoke->setText(m_visionSmokeActive ? "视觉识别烟雾" : "未识别");
+    m_valSmoke->setStyleSheet(m_visionSmokeActive ? "color:#e53935; font-weight:bold;" : "color:#43a047;");
 }
 
 void MainWindow::onVisionStatus(bool running)
@@ -663,26 +761,19 @@ void MainWindow::onVisionStatus(bool running)
 
 void MainWindow::onThermalFrame(const QImage &img, double minC, double maxC)
 {
-    // 时域 EMA 混合：热像帧率低(~1-2fps)，直接刷会跳变卡顿；与上一帧按 0.5 混合，
-    // 再平滑放大，观感明显更流畅（下位机帧率不变，纯显示端优化）。
+    // 显示最新一帧，不与历史帧做时域混合。旧版 50% 累积会让热点移动和温度
+    // 变化多滞后一到数帧，巡检现场更需要及时性而不是拖影。
     QImage cur = img.convertToFormat(QImage::Format_RGB888);
-    if (m_thermalAccum.size() != cur.size()) {
-        m_thermalAccum = cur;
-    } else {
-        const int n = cur.width() * cur.height() * 3;
-        uchar *a = m_thermalAccum.bits();
-        const uchar *b = cur.constBits();
-        for (int i = 0; i < n; ++i)
-            a[i] = uchar((int(a[i]) + int(b[i])) / 2);
-    }
+    m_thermalAccum = cur;
     // 平滑放大到较大尺寸，避免像素块状（24x32 -> 更细腻）
     QImage shown = m_thermalAccum.scaled(m_thermalAccum.width() * 8,
                                          m_thermalAccum.height() * 8,
                                          Qt::KeepAspectRatio, Qt::SmoothTransformation);
     m_thermalView->setImage(shown);
-    m_lblThermalRange->setText(QString("量程: %1 ~ %2 °C   (%3x%4)")
-                               .arg(minC, 0, 'f', 1).arg(maxC, 0, 'f', 1)
-                               .arg(img.width()).arg(img.height()));
+    m_lastThermalMs = QDateTime::currentMSecsSinceEpoch();
+    m_thermalRangeText=QString("量程: %1 ~ %2 °C   (%3x%4)")
+                               .arg(minC,0,'f',1).arg(maxC,0,'f',1).arg(img.width()).arg(img.height());
+    updateThermalPresentation();
 }
 
 void MainWindow::onTextFrame(const QString &text)
@@ -716,11 +807,38 @@ void MainWindow::onTextFrame(const QString &text)
     }
 }
 
+void MainWindow::updateThermalPresentation()
+{
+    const bool fresh=m_net->isConnected() && m_deviceThermalFresh && m_thermalState==2 &&
+        m_lastThermalMs && QDateTime::currentMSecsSinceEpoch()-m_lastThermalMs<3000;
+    m_lblThermalRange->setText(m_thermalAccum.isNull()?QString("量程: —（尚无有效图像）"):
+        m_thermalRangeText+(fresh?" · 实时":" · 保留最后一帧（已停止或数据过期）"));
+}
+
+void MainWindow::markSensorDisplaysHeld()
+{
+    QLabel* labels[]={m_valTemp,m_valHumi,m_valGas,m_valDistance,m_valLaser};
+    for(int i=0;i<5;++i) if(!m_heldValues[i].isEmpty()) {
+        labels[i]->setText(m_heldValues[i]+"（保留）"); labels[i]->setStyleSheet("color:#9e9e9e;");
+    }
+}
+
 void MainWindow::onRateTick()
 {
+    if(m_lastDeviceMs && QDateTime::currentMSecsSinceEpoch()-m_lastDeviceMs>2000) {
+        m_thermalState=-1; m_thermalStatus->setText("设备状态超时");
+        m_runtimeStatus->setText("设备设置未知，等待重新确认");
+    }
+    if(!m_net->isConnected() || (m_lastSensorMs && QDateTime::currentMSecsSinceEpoch()-m_lastSensorMs>=2000)) markSensorDisplaysHeld();
+    updateThermalPresentation();
     const int hz = m_sensorCount;
     m_valSensorHz->setText(QString("%1 Hz").arg(hz));
     m_sensorCount = 0;
+
+    if (m_thermalState != 0 && m_lastThermalMs > 0 &&
+        QDateTime::currentMSecsSinceEpoch() - m_lastThermalMs >= 3000) {
+        updateThermalPresentation();
+    }
 
     // ★链路健康：连着却长时间收不到传感器帧 = F4 数据冻结（正是"连接在、数值不动"的掉线）。
     if (!m_net->isConnected()) {
@@ -732,11 +850,11 @@ void MainWindow::onRateTick()
     if (age < 0) {
         m_valLink->setText("● 已连接 · 等待F4数据");
         m_valLink->setStyleSheet("color:#ffb020; font-weight:bold;");
-    } else if (age < 1500) {
+    } else if (age < 1500 && m_sourceFault==0) {
         m_valLink->setText(QString("● 正常 · %1 Hz").arg(hz));
         m_valLink->setStyleSheet("color:#43a047; font-weight:bold;");
     } else {
-        m_valLink->setText(QString("● F4数据冻结 %1s").arg(age / 1000));
+        m_valLink->setText(m_sourceFault ? "● F4 传感器数据缺失或超时" : QString("● F4数据冻结 %1s").arg(age / 1000));
         m_valLink->setStyleSheet("color:#e53935; font-weight:bold;");
     }
 }

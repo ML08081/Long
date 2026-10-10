@@ -31,6 +31,7 @@ public:
     // 提取标定参数（收到完整 EEPROM 后调用一次）。成功返回 true。
     bool setEeprom(const uint16_t* ee832);
 
+    void resetFrame() { pages_=0; }
     bool ready() const { return ready_; }
 
     // 解算一帧原始数据 -> 768 个 int16 温度(0.01°C, 行主序)。out 至少 PIXELS 个。
@@ -43,6 +44,8 @@ public:
 private:
     paramsMLX90640 params_{};
     bool  ready_      = false;
+    uint8_t pages_=0;
+    uint32_t eepromHash_=0;
     float emissivity_ = 0.95f;   // 与原 F4 thermal.c 一致
     float trOffset_   = 8.0f;    // 反射温度 = Ta - 8°C
     float to_[PIXELS] = {0};     // 解算结果暂存（避免大栈占用）
