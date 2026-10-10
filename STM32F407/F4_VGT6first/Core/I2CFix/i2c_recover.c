@@ -40,12 +40,11 @@ static uint8_t bus_recover(GPIO_TypeDef *sclPort, uint16_t sclPin,
     g.Pull  = GPIO_PULLUP;
     g.Speed = GPIO_SPEED_FREQ_LOW;
 
-    g.Pin = sclPin;  HAL_GPIO_Init(sclPort, &g);
-    g.Pin = sdaPin;  HAL_GPIO_Init(sdaPort, &g);
-
-    /* 先都释放为高 */
+    /* 先预置 ODR 为释放，避免切换为输出时产生意外低脉冲。 */
     HAL_GPIO_WritePin(sclPort, sclPin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(sdaPort, sdaPin, GPIO_PIN_SET);
+    g.Pin = sclPin;  HAL_GPIO_Init(sclPort, &g);
+    g.Pin = sdaPin;  HAL_GPIO_Init(sdaPort, &g);
     half_bit_delay();
 
     /* ---- 2. 打 9 个时钟，逼从机把卡住的那一位发完并释放 SDA ---- */
@@ -59,6 +58,8 @@ static uint8_t bus_recover(GPIO_TypeDef *sclPort, uint16_t sclPin,
     }
 
     /* ---- 3. 补一个 STOP：SCL 高期间 SDA 由低变高 ---- */
+    HAL_GPIO_WritePin(sclPort, sclPin, GPIO_PIN_RESET);
+    half_bit_delay();
     HAL_GPIO_WritePin(sdaPort, sdaPin, GPIO_PIN_RESET);
     half_bit_delay();
     HAL_GPIO_WritePin(sclPort, sclPin, GPIO_PIN_SET);
@@ -66,7 +67,8 @@ static uint8_t bus_recover(GPIO_TypeDef *sclPort, uint16_t sclPin,
     HAL_GPIO_WritePin(sdaPort, sdaPin, GPIO_PIN_SET);
     half_bit_delay();
 
-    uint8_t released = (HAL_GPIO_ReadPin(sdaPort, sdaPin) == GPIO_PIN_SET) ? 1U : 0U;
+    uint8_t released = (HAL_GPIO_ReadPin(sclPort, sclPin) == GPIO_PIN_SET &&
+                        HAL_GPIO_ReadPin(sdaPort, sdaPin) == GPIO_PIN_SET) ? 1U : 0U;
 
     /* 打完 9 个时钟 + STOP 后 SDA 仍被拉低 = 从机彻底失联（多半是掉电/短路），
        软件已无能为力，上报看门狗；累计到阈值让 IWDG 复位整机再试。
@@ -86,28 +88,38 @@ static uint8_t bus_recover(GPIO_TypeDef *sclPort, uint16_t sclPin,
     return released;
 }
 
-/* 外设级复位：清掉 F4 上 I2C 卡在 BUSY 的已知问题，再重新初始化 */
-static void periph_reset(I2C_HandleTypeDef *h, void (*reinit)(void))
+/* MSP DeInit 会关闭外设时钟。此后写 CR1.SWRST 不生效，必须使用 RCC 复位。
+   在 GPIO 总线恢复之前停用外设，防止外设和 GPIO 同时驱动总线。 */
+static void periph_reset(I2C_HandleTypeDef *h)
 {
     HAL_I2C_DeInit(h);
-    h->Instance->CR1 |=  I2C_CR1_SWRST;   /* 软复位保持 */
-    __NOP(); __NOP();
-    h->Instance->CR1 &= ~I2C_CR1_SWRST;   /* 释放软复位 */
-    reinit();
+    if (h->Instance == I2C2) {
+        __HAL_RCC_I2C2_CLK_ENABLE();
+        __HAL_RCC_I2C2_FORCE_RESET();
+        __NOP(); __NOP();
+        __HAL_RCC_I2C2_RELEASE_RESET();
+    } else if (h->Instance == I2C3) {
+        __HAL_RCC_I2C3_CLK_ENABLE();
+        __HAL_RCC_I2C3_FORCE_RESET();
+        __NOP(); __NOP();
+        __HAL_RCC_I2C3_RELEASE_RESET();
+    }
 }
 
 uint8_t I2C2_BusRecover(void)
 {
     /* VL53L0X: SCL=PB10, SDA=PB11, AF4 = I2C2 */
+    periph_reset(&hi2c2);
     uint8_t ok = bus_recover(GPIOB, GPIO_PIN_10, GPIOB, GPIO_PIN_11, GPIO_AF4_I2C2);
-    periph_reset(&hi2c2, MX_I2C2_Init);
+    MX_I2C2_Init();
     return ok;
 }
 
 uint8_t I2C3_BusRecover(void)
 {
     /* MLX90640: SCL=PA8, SDA=PC9, AF4 = I2C3 */
+    periph_reset(&hi2c3);
     uint8_t ok = bus_recover(GPIOA, GPIO_PIN_8, GPIOC, GPIO_PIN_9, GPIO_AF4_I2C3);
-    periph_reset(&hi2c3, MX_I2C3_Init);
+    MX_I2C3_Init();
     return ok;
 }

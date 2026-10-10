@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Servo/servo2.c
     Core/Encoder/encoder.c
     Core/Motor/motor.c
+    Core/Motor/motion_control.c
     Core/PID/pid.c
     Core/HC/hc.c
     # OLED 已移除（2026-07-08 硬件取消）
@@ -57,6 +58,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/CAN/can_link.c
     Core/LineTrack/linetrack.c
     Core/Patrol/patrol.c
+    Core/Patrol/runtime_control.c
     Core/Watchdog/watchdog.c
     Core/I2CFix/i2c_recover.c
     Core/Debug/bt_debug.c
@@ -109,4 +111,14 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+)
+
+# CubeIDE/CMake 链接后自动刷新烧录文件。旧工程只更新 ELF，会让烧录工具
+# 反复写入历史 HEX；将转换绑定到目标后可保证源码、ELF 和 HEX 始终同版。
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.hex
+    COMMENT "Generating current F4_VGT6first.hex from linked ELF"
+    VERBATIM
 )

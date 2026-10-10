@@ -3,7 +3,6 @@
 # =============================================================================
 [Unit]
 Description=PatrolSystem 开机 WiFi 自动连接（Station 连 B410 + 固定 IP）
-Before=patrol.service
 After=network-pre.target
 Wants=network-pre.target
 

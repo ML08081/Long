@@ -5,14 +5,15 @@
   ******************************************************************************
   */
 #include "patrol.h"
+#include "runtime_control.h"
 #include "linetrack.h"
 #include "hc.h"          /* HC_NO_TARGET_CM */
 #include "cmsis_os.h"    /* osKernelGetTickCount */
 
 /* ==== 可调参数（实车整定；上限见实施方案 §2.7 标定表）==== */
-#define PATROL_SPEED        300     /* 巡航基速(直行) (-1000..1000)，先低速调试 */
-#define PATROL_MIN_SPEED    140     /* 速度下限：转弯/近障时不低于此(太低电机推不动/爬行) */
-#define PATROL_TURN_SPEED   220     /* 路口通过/找线时的创速 */
+#define PATROL_SPEED        Runtime_Speed()     /* 巡航基速(直行) (100..1500 档位)，先低速调试 */
+#define PATROL_MIN_SPEED    ((PATROL_SPEED < 140U) ? PATROL_SPEED : 140U)     /* 速度下限：转弯/近障时不低于此(太低电机推不动/爬行) */
+#define PATROL_TURN_SPEED   ((PATROL_SPEED < 220U) ? PATROL_SPEED : 220U)     /* 路口通过/找线时的创速 */
 #define STEER_GAIN          350     /* 线位置误差(-2..2) → 转向量 */
 #define LOST_TIMEOUT_MS     800     /* 丢线超过此时长判定丢线停车 */
 #define TICK_MS             17      /* 与 MotionControlTask osDelay(17) 一致 */
@@ -80,6 +81,7 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
 
     if (s_st == PATROL_ST_IDLE) return PATROL_EV_NONE;
 
+    if (s_st == PATROL_ST_HOLD || s_st == PATROL_ST_ARRIVE) return PATROL_EV_NONE;
     LineState ls = LineTrack_Read();
 
     /* ---- Tier0 安全反射：前向停障优先于一切循线动作 ----
@@ -193,7 +195,7 @@ PatrolEventT Patrol_Update(int16_t *out_speed, int16_t *out_steer, uint16_t fron
 
         /* 取两级里更小的速度；非 0 时不低于 MIN（避免爬行推不动） */
         int32_t v = (vdist < base) ? vdist : base;
-        if (v > 0 && v < PATROL_MIN_SPEED) v = PATROL_MIN_SPEED;
+        /* Obstacle deceleration may be below a configuration gear; never raise it. */
         *out_speed = (int16_t)v;
         return PATROL_EV_NONE;
     }

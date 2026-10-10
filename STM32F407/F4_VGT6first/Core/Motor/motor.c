@@ -17,17 +17,13 @@ void Motor_Init(void)
 }
 
 /**
- * 死区补偿 + 斜坡限幅。
- *  1) 死区补偿：非零指令抬到至少 MOTOR_MIN_DUTY，保证每个指令都真的产生动作；
- *     绝对值小于 MOTOR_DEADZONE 的当作停车，避免零位附近来回抖。
- *  2) 斜坡限幅：限制相对上一周期的变化量，把前进/后退切换这类突变摊成斜坡，
- *     消除电流冲击与机械顿挫。
+ * 连续小占空比、50%硬限幅及每拍8单位保护；零指令立即停止。
  */
 static int16_t shape_output(int16_t speed, int16_t *last)
 {
 	/* 限幅 */
-	if(speed >  MAX_SPEED) speed =  MAX_SPEED;
-	if(speed < -MAX_SPEED) speed = -MAX_SPEED;
+	if(speed >  MOTOR_MAX_DUTY) speed =  MOTOR_MAX_DUTY;
+	if(speed < -MOTOR_MAX_DUTY) speed = -MOTOR_MAX_DUTY;
 
 	/* 死区补偿 */
 	if(speed > -MOTOR_DEADZONE && speed < MOTOR_DEADZONE)

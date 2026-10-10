@@ -1,6 +1,45 @@
 #include <QApplication>
+#include <QEvent>
 #include <QStringList>
+#include <QStyleHints>
 #include "mainwindow.h"
+
+#ifdef Q_OS_WIN
+#include <qt_windows.h>
+#include <dwmapi.h>
+
+// QSS 不作用于系统标题栏；统一主窗口和遥控面板的原生窗口配色。
+class DarkTitleBarFilter final : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (event->type() == QEvent::Show) {
+            auto *window = qobject_cast<QWidget *>(object);
+            if (window && window->isWindow()
+                && (window->windowType() == Qt::Window || window->windowType() == Qt::Dialog)) {
+                const HWND hwnd = reinterpret_cast<HWND>(window->winId());
+                const BOOL dark = TRUE;
+                // 20 为 Windows 10 20H1 起的暗色标题栏属性，19 兼容更早的版本。
+                if (FAILED(DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark))))
+                    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
+
+                // Windows 11 支持指定边框、标题栏背景和文字颜色。
+                const COLORREF border = RGB(0x2c, 0x36, 0x50);
+                const COLORREF caption = RGB(0x16, 0x1b, 0x26);
+                const COLORREF text = RGB(0xe8, 0xec, 0xf4);
+                DwmSetWindowAttribute(hwnd, 34, &border, sizeof(border));
+                DwmSetWindowAttribute(hwnd, 35, &caption, sizeof(caption));
+                DwmSetWindowAttribute(hwnd, 36, &text, sizeof(text));
+            }
+        }
+        return QObject::eventFilter(object, event);
+    }
+};
+#endif
 
 // 暗色监控大屏主题
 static const char *kStyle = R"QSS(
@@ -70,7 +109,14 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("LongLook");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    app.styleHints()->setColorScheme(Qt::ColorScheme::Dark);
+#endif
     app.setStyleSheet(QString::fromUtf8(kStyle));
+#ifdef Q_OS_WIN
+    DarkTitleBarFilter titleBarFilter;
+    app.installEventFilter(&titleBarFilter);
+#endif
 
     MainWindow w;
     w.show();

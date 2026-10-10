@@ -18,7 +18,7 @@ extern "C" {
  *============================================================================*/
 
 #define FLAME_ACTIVE_LOW   1    /* 检测到火焰输出低电平 */
-#define FLAME_DEBOUNCE_N   10   /* 连续 10 次一致(~1s@10Hz)才更新稳定状态，抗 IR 抖动/误报 */
+#define FLAME_DEBOUNCE_N    3   /* 连续 3 次一致(~300ms@10Hz)更新，兼顾响应与抗 IR 毛刺 */
 
 /* 初始化（PD7 已由 MX_GPIO_Init 配为输入，这里仅复位状态） */
 void Flame_Init(void);

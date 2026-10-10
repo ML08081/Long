@@ -18,6 +18,7 @@
 #include <QImage>
 #include <QVector>
 
+class QSpinBox;
 class RemotePanel;
 
 /*
@@ -98,6 +99,19 @@ private:
     ImageView *m_videoView = nullptr;
     ImageView *m_thermalView = nullptr;
     QLabel    *m_lblThermalRange = nullptr;
+    QComboBox *m_cmbThermal=nullptr;
+    QSpinBox *m_speedSetting=nullptr;
+    QLabel *m_runtimeStatus=nullptr;
+    QLabel *m_thermalStatus=nullptr;
+    qint64 m_lastDeviceMs=0;
+    int m_thermalState=-1;
+    int m_sourceFault=3;
+    QString m_heldValues[5];
+    QString m_thermalRangeText;
+    bool m_deviceThermalFresh=false;
+    void updateThermalPresentation();
+    void markSensorDisplaysHeld();
+
 
     // 环境感知
     QLabel *m_valTemp = nullptr;
@@ -110,8 +124,6 @@ private:
     QLabel *m_valEnc2 = nullptr;
     QLabel *m_valSpeedL = nullptr;
     QLabel *m_valSpeedR = nullptr;
-    QLabel *m_valServo = nullptr;
-    QLabel *m_valVoltage = nullptr;
     QLabel *m_valMode = nullptr;
     QLabel *m_valFault = nullptr;
     // 视觉与风险
@@ -155,9 +167,16 @@ private:
     QLabel             *m_lblVision = nullptr;   // 状态/检测数
     QImage              m_lastFrame;             // 最近一帧原始视频（用于叠加）
     QVector<Detection>  m_lastDets;              // 最近一次检测结果
+    int                 m_visionFireHits = 0;
+    int                 m_visionSmokeHits = 0;
+    int                 m_visionFireMisses = 0;
+    int                 m_visionSmokeMisses = 0;
+    bool                m_visionFireActive = false;
+    bool                m_visionSmokeActive = false;
 
     // 热成像时域平滑：对相邻帧做像素 EMA 混合，低帧率下不跳变、观感更流畅
     QImage              m_thermalAccum;          // 累积混合图（与热像同尺寸）
+    qint64              m_lastThermalMs = 0;     // 停采后保留末帧，用状态和时间标记冻结
 };
 
 #endif // MAINWINDOW_H

@@ -10,7 +10,7 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET   = LongLook
 TEMPLATE = app
 CONFIG  += c++20
-win32: LIBS += -lXinput
+win32: LIBS += -lXinput -ldwmapi
 
 SOURCES += \
     main.cpp \

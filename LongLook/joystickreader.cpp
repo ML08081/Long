@@ -3,7 +3,9 @@
 #include <cmath>
 
 #ifdef Q_OS_WIN
+#ifdef _MSC_VER
 #pragma comment(lib, "Xinput.lib")
+#endif
 #endif
 
 static const double kDeadZone = 0.05;

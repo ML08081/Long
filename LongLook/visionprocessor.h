@@ -7,6 +7,7 @@
 #include <QVector>
 #include <QByteArray>
 #include <QString>
+#include <QTimer>
 
 /*
  * VisionProcessor — 上位机视觉识别接口（预留 / 可开关）
@@ -15,7 +16,7 @@
  *
  *  - 识别推理放在一个独立的 Python 边车进程(yolo_sidecar.py)里，用 QProcess 托管。
  *    这样 LongLook(Qt/C++) 与具体模型完全解耦：换模型只需替换 .pt 文件或改一行脚本，
- *    LongLook 无需重编。当前默认接 F:/projectForXN/NGFXM/best.pt（Ultralytics YOLO）。
+ *    LongLook 无需重编。当前默认接入已验证的火焰/烟雾 YOLOv8n。
  *
  *  - 边车协议（极简、自同步）：
  *      LongLook -> sidecar(stdin) : [len u32 LE][JPEG 字节]  每帧一包
@@ -44,6 +45,7 @@ public:
 
     bool isEnabled() const { return m_enabled; }
     bool isRunning() const;
+    bool isReady() const { return m_ready; }
 
     // 预留接口：换模型 / 换解释器 / 调阈值（在 setEnabled(true) 前设置）
     void setModelPath(const QString &p)  { m_modelPath = p; }
@@ -73,16 +75,19 @@ private:
 
     QProcess *m_proc = nullptr;
     bool      m_enabled = false;
+    bool      m_ready = false;     // Python 已完成模型加载，不只是进程存活
     bool      m_pending = false;   // 已送一帧、等待其结果（背压）
     QByteArray m_stdoutBuf;        // stdout 行缓冲
+    QTimer   *m_frameWatchdog = nullptr;
+    QTimer   *m_startWatchdog = nullptr;
 
     // ---- 可配置（预留，便于后期替换模型）----
     // 默认指向已配好 ultralytics 的项目环境解释器（不依赖系统 PATH，避免找到没装依赖的 python）。
     // 换环境改这里或调 setPythonExe()。
     QString m_pythonExe  = "F:/ProjectOPaYO/my_envs/python.exe";
     QString m_scriptPath;          // 默认在构造函数里按可执行文件目录推导
-    QString m_modelPath  = "F:/projectForXN/NGFXM/best.pt";
-    double  m_conf       = 0.35;
+    QString m_modelPath  = "F:/projectForXN/NGFXM/YOLO模型/fire_smoke_yolov8n.pt";
+    double  m_conf       = 0.20;
 };
 
 #endif // VISIONPROCESSOR_H

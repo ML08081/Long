@@ -25,6 +25,7 @@ public:
     void setImage(const QImage &img);   // 设置一帧并触发重绘 + FPS 计数
     void clearImage();                  // 清空回到占位状态
     double fps() const { return m_fps; }
+    bool hasImage() const { return !m_image.isNull(); }
 
 protected:
     void paintEvent(QPaintEvent *event) override;

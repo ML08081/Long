@@ -17,6 +17,7 @@
 #include <MLX90640_I2C_Driver.h>
 #include <MLX90640_API.h>
 #include <math.h>
+#include "stm32f4xx_hal.h"
 
 static void ExtractVDDParameters(uint16_t *eeData, paramsMLX90640 *mlx90640);
 static void ExtractPTATParameters(uint16_t *eeData, paramsMLX90640 *mlx90640);
@@ -129,7 +130,7 @@ int MLX90640_GetFrameData(uint8_t slaveAddr, uint16_t *frameData)
        →USART1(PA9) 热成像输出永久消失(实测约8s后无波形)。加迭代上限后超时返回
        负错误码，任务下一拍(200ms)重试，不再永久挂死。2Hz 下一子页≈250ms,
        每次状态读≈0.4ms，6000 次≈2.4s 远大于刷新周期,不会误超时。 */
-    uint32_t dr_guard = 6000U;
+    uint32_t dr_start = HAL_GetTick();
     while(dataReady == 0)
     {
         error = MLX90640_I2CRead(slaveAddr, MLX90640_STATUS_REG, 1, &statusRegister);
@@ -139,9 +140,11 @@ int MLX90640_GetFrameData(uint8_t slaveAddr, uint16_t *frameData)
         }
         //dataReady = statusRegister & 0x0008;
         dataReady = MLX90640_GET_DATA_READY(statusRegister);
-        if(dataReady == 0 && --dr_guard == 0U)
+        if(dataReady == 0)
         {
-            return -MLX90640_FRAME_DATA_ERROR;   /* 就绪位超时：交回调用方重试 */
+            if ((HAL_GetTick() - dr_start) >= 800U)
+                return -MLX90640_FRAME_DATA_ERROR;
+            HAL_Delay(1);  /* 不再无间隔轰击 I2C，给传感器状态机和其它任务留时间 */
         }
     }
     

@@ -21,6 +21,10 @@
 #include "usart.h"
 
 /* USER CODE BEGIN 0 */
+#include "runtime_control.h"
+#ifndef PID_TUNING_ENABLED
+#define PID_TUNING_ENABLED 0
+#endif
 #include "bt_debug.h"   /* BTDbg_On* 蓝牙链路诊断回调声明 */
 /* USER CODE END 0 */
 
@@ -404,6 +408,10 @@ uint8_t USART3_GetFsmState(void)
 /*------------------------------------------------------------------*/
 static void USART3_ProcessRxByte(uint8_t byte)
 {
+    static uint32_t lastByteMs=0;
+    uint32_t now=HAL_GetTick();
+    if(now-lastByteMs>50U) { rx_state=0; rx_idx=0; }
+    lastByteMs=now;
     g_rx_byte_cnt++;
     BTDbg_OnRxByte(byte);
 
@@ -424,20 +432,14 @@ static void USART3_ProcessRxByte(uint8_t byte)
            合法值仅 0x00~0x03 / 0xFC~0xFF，与 PID 标记不冲突，可安全解复用）。 */
         if (rx_idx == 1)
         {
-            if      (byte == FRAME_PIDPARAM_MARKER) rx_expect = FRAME_PIDPARAM_LENGTH;
+            if      (byte == 0x63U) rx_expect = 12U;
+            else if (byte == FRAME_PIDPARAM_MARKER) rx_expect = FRAME_PIDPARAM_LENGTH;
             else if (byte == FRAME_PIDTEST_MARKER)  rx_expect = FRAME_PIDTEST_LENGTH;
             else                                    rx_expect = FRAME_LENGTH;
         }
         /* 中途 0xAA 重同步启发式：仅对 7B 命令帧生效（PID 帧 payload 可能含
            0xAA，靠 XOR 校验兜底，不做中途重同步以免撕裂合法帧）。 */
-        if (rx_expect == FRAME_LENGTH && byte == FRAME_HEADER && rx_idx < 6)
-        {
-            rx_frame[0] = byte;
-            rx_idx = 1;
-            rx_state = RX_STATE_RECV;
-            g_rx_header_err++;
-            break;
-        }
+/* A payload byte 0xAA is legal (e.g. speed=170); only inter-byte timeout resynchronizes. */
         rx_frame[rx_idx++] = byte;
         if (rx_idx >= rx_expect)
         {
@@ -446,12 +448,13 @@ static void USART3_ProcessRxByte(uint8_t byte)
                 raw[i] = rx_frame[i];
             }
 
-            if (rx_expect == FRAME_PIDPARAM_LENGTH)
+            if (rx_expect == 12U) { Runtime_UartRequest(raw); }
+            else if (rx_expect == FRAME_PIDPARAM_LENGTH)
             {
                 /* 0x60 PID 参数帧：XOR 校验 + 解析 */
                 if (Protocol_CalculateChecksum(raw, FRAME_PIDPARAM_LENGTH - 1)
                         == raw[FRAME_PIDPARAM_LENGTH - 1]
-                    && Protocol_UnpackPidParam(raw, &g_pid_param_rx))
+                    && PID_TUNING_ENABLED && Protocol_UnpackPidParam(raw, &g_pid_param_rx))
                 {
                     g_pid_param_ready = 1;
                     g_rx_pid_frame_cnt++;
@@ -463,7 +466,7 @@ static void USART3_ProcessRxByte(uint8_t byte)
                 /* 0x61 PID 测试帧 */
                 if (Protocol_CalculateChecksum(raw, FRAME_PIDTEST_LENGTH - 1)
                         == raw[FRAME_PIDTEST_LENGTH - 1]
-                    && Protocol_UnpackPidTest(raw, &g_pid_test_rx))
+                    && PID_TUNING_ENABLED && Protocol_UnpackPidTest(raw, &g_pid_test_rx))
                 {
                     g_pid_test_ready = 1;
                     g_rx_pid_frame_cnt++;

@@ -71,6 +71,7 @@ public:
         std::string visionName;
         uint8_t     visionConf  = 0;
         int         thermalMaxC10 = -1000;
+        bool        thermalFresh = false;
         bool        hotspot     = false;
         std::string version;               // 固件版本串
         uint32_t    uptimeS     = 0;       // 本进程运行时长(秒)

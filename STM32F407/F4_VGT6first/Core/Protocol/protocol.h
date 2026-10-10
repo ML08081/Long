@@ -124,7 +124,7 @@ typedef struct {
 #define MODE_LINE_VISION  MODE_CRUISE    /* 3 */
 
 typedef struct {
-    int16_t speed;    // -1000~+1000，正=前进，负=后退，0=刹车
+    int16_t speed;    // -1500~+1500，正=前进，负=后退，0=刹车
     int16_t steering; // -1000~+1000，正=右转，负=左转，0=直线
     uint8_t mode;     // 0=Manual, 1=Auto, 2=ObstacleAvoid, 3=Cruise
 } ControlData;

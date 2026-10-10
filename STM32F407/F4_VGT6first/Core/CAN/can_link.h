@@ -139,6 +139,8 @@ const char* CANLink_LECStr(void);
 
 /* ===== 诊断计数（供 DBG 打印，确认收发是否真的在动） ===================== */
 extern volatile uint32_t g_can_rx_cmd_cnt;    /* 收到 0x201 命令帧数        */
+extern volatile uint32_t g_remote_vision_ms;
+extern volatile uint8_t  g_remote_vision_alarm; /* 0无/1烟雾/2火焰，来自龙芯 */
 extern volatile uint32_t g_can_rx_other_cnt;  /* 收到 0x301/0x601 帧数      */
 extern volatile uint32_t g_can_tx_cnt;        /* 成功投递发送帧数          */
 extern volatile uint32_t g_can_tx_drop;       /* 邮箱满丢弃帧数            */

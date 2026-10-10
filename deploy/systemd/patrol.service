@@ -3,14 +3,14 @@
 # =============================================================================
 [Unit]
 Description=PatrolSystem 龙芯巡检视频链路服务（下位机）
-After=network-online.target patrol-network.service
-Wants=network-online.target
-Requires=patrol-network.service
+After=network.target
+Wants=patrol-network.service
 
 [Service]
 Type=simple
 # 启动前健康检测（非致命，仅记录日志）
-ExecStartPre=/usr/bin/patrol_healthcheck /var/log/patrol
+# DNS/ping diagnostics run asynchronously after the process starts.
+ExecStartPost=/bin/sh -c '/usr/bin/patrol_healthcheck /var/log/patrol >/dev/null 2>&1 &'
 # 经 start.sh 包装启动（等摄像头就绪 + 指定日志目录）
 ExecStart=/usr/bin/patrol_start
 # 崩溃/摄像头掉线导致退出时自动重启

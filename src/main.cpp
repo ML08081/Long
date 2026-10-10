@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
     cfgmgr.load(configPath);
 
     AppConfig cfg;
+    cfg.runtimeSpeedPath=configPath+".speed";
     cfg.device   = cfgmgr.camera().device;
     cfg.width    = cfgmgr.camera().width;
     cfg.height   = cfgmgr.camera().height;

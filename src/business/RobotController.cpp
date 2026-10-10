@@ -47,19 +47,20 @@ bool RobotController::init(const LinkConfig& link) {
         if (!can_.open(link.canIf)) {
             LOG_ERROR("RobotController: CAN 接口 %s 打开失败，运动控制不可用"
                       "（检查 can0 是否 up / 内核 CAN 子系统）", link.canIf.c_str());
-            return false;
         }
         registerCanCallbacks();
         LOG_INFO("RobotController 就绪（传输层=CAN, %s @ 500kbps）", link.canIf.c_str());
     } else {
         if (!serial_.open(link.device, link.baud)) {
             LOG_ERROR("RobotController: 串口 %s 打开失败，运动控制不可用", link.device.c_str());
-            return false;
         }
         registerControlCallbacks();
         LOG_INFO("RobotController 就绪（传输层=UART, %s @ %d）", link.device.c_str(), link.baud);
     }
 
+    controlOpen_.store(useCan_ ? can_.isOpen() : serial_.isOpen());
+    openedMs_=nowMs();
+    thermalDevice_=link.thermalDevice; thermalBaud_=link.thermalBaud;
     const std::string& thermalDevice = link.thermalDevice;
     const int thermalBaud = link.thermalBaud;
 
@@ -79,22 +80,40 @@ bool RobotController::init(const LinkConfig& link) {
             LOG_ERROR("热成像串口 %s 打开失败（热成像不可用，不影响控制）", thermalDevice.c_str());
         }
     }
+    thermalSerial_.setThermalCallback([this](const int16_t* t,int c,int r){ onThermal(t,c,r); });
+    thermalSerial_.setRawThermalCallback([this](const uint16_t* p,int n){ onRawThermal(p,n); });
+    thermalSerial_.setEepromCallback([this](const uint16_t* p,int n){ onEeprom(p,n); });
     // 启动热成像解算独立线程：把重解算(ExtractParameters/CalculateTo)从控制线程剥离，
     // 保证控制线程严格实时（每 tick 快速下发命令帧，始终满足 F4 的 ~510ms 心跳）。
     if (!solverRun_.exchange(true))
         solverThread_ = std::thread([this] { solverLoop(); });
 
-    return true;
+    return controlOpen_.load();
 }
 
 // 给 can_ 挂全部回调：遥测/环境复用与串口完全相同的消费函数（只换"帧从哪来"），
 // 另加 CAN 专有的巡检事件/扫描剖面/心跳回调。
 void RobotController::registerCanCallbacks() {
+    can_.setMotionCallback([this](const uint8_t* p,size_t n){ onMotionStatus(p,n); });
+    can_.setRuntimeCallback([this](const uint8_t* p,size_t n){ onRuntimeStatus(p,n); });
     can_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
     can_.setEnvCallback([this](const serial_proto::EnvData& e) { onEnv(e); });
     can_.setPatrolEventCallback([this](const can_proto::PatrolEvent& ev) { onPatrolEvent(ev); });
     can_.setAvoidProfileCallback([this](const can_proto::AvoidProfile& pr) { onAvoidProfile(pr); });
     can_.setHeartbeatCallback([this](const can_proto::Heartbeat& hb) { onHeartbeat(hb); });
+}
+
+void RobotController::onMotionStatus(const uint8_t* p, size_t n) {
+    if(n!=8 || (p[0]!=6 && p[0]!=7)) return;
+    std::lock_guard<std::mutex> lk(mtx_);
+    auto i16=[](const uint8_t* d){ return static_cast<int16_t>((uint16_t(d[0])<<8)|d[1]); };
+    if(p[0]==6) {
+        motionTarget_=i16(p+1); motionRight_=i16(p+3); motionLeft_=i16(p+5); motionFault_=p[7];
+    } else {
+        if(p[7]!=1) return;
+        motionPwmRight_=i16(p+1); motionPwmLeft_=i16(p+3); motionDtMs_=p[5]; motionFault_=p[6];
+    }
+    motionMs_=nowMs();
 }
 
 void RobotController::onPatrolEvent(const can_proto::PatrolEvent& ev) {
@@ -130,6 +149,7 @@ void RobotController::onHeartbeat(const can_proto::Heartbeat& hb) {
 // 给控制口挂全部回调（init 与串口重开后共用，保证重开后回调不丢）。
 // 控制口也挂热成像回调，兼容 F4 单串口发送(0x5B/0x5D/0x5E)的情形。
 void RobotController::registerControlCallbacks() {
+    serial_.setRuntimeCallback([this](const uint8_t* p,size_t n){ onRuntimeStatus(p,n); });
     serial_.setTelemetryCallback([this](const serial_proto::Telemetry& t) { onTelemetry(t); });
     serial_.setEnvCallback([this](const serial_proto::EnvData& e) { onEnv(e); });
     serial_.setThermalCallback([this](const int16_t* t, int c, int r) { onThermal(t, c, r); });
@@ -148,6 +168,7 @@ void RobotController::reopenControlSerial() {
         } else {
             LOG_ERROR("F4 CAN 链路重建失败: %s（下次周期重试）", canIf_.c_str());
         }
+        controlOpen_.store(can_.isOpen()); openedMs_=nowMs();
         return;
     }
     LOG_WARN("F4 控制串口 %s 遥测断流 >3s，重开串口自恢复...", ctrlDevice_.c_str());
@@ -158,6 +179,7 @@ void RobotController::reopenControlSerial() {
     } else {
         LOG_ERROR("F4 控制串口重开失败: %s（下次周期重试）", ctrlDevice_.c_str());
     }
+    controlOpen_.store(serial_.isOpen()); openedMs_=nowMs();
 }
 
 RobotController::~RobotController() { close(); }
@@ -169,6 +191,7 @@ void RobotController::close() {
     serial_.close();
     can_.close();
     thermalSerial_.close();
+    controlOpen_.store(false);
 }
 
 // 热成像解算独立线程：轮询热成像专线 + 消费待解算暂存（EEPROM 提参/原始帧解算）。
@@ -176,15 +199,36 @@ void RobotController::close() {
 void RobotController::solverLoop() {
     LOG_INFO("热成像解算线程启动（独立于控制线程，保证 F4 心跳实时）");
     std::vector<uint16_t> ee, raw;
+    uint32_t epoch=thermalEpoch_.load(), lastRawMs=nowMs(), reopenMs=0;
     while (solverRun_.load()) {
         // 热成像专线读取+组帧；回调 onRawThermal/onEeprom 只把数据投入 pending（廉价）。
+        uint32_t now=nowMs();
+        if(epoch!=thermalEpoch_.load()) {
+            epoch=thermalEpoch_.load(); thermalSolver_.resetFrame();
+            thermalSerial_.resetThermalAssembly(); lastRawMs=now;
+            std::lock_guard<std::mutex> lk(rawMtx_); pendingRawNew_=false;
+        }
+        bool expected=true;
+        { std::lock_guard<std::mutex> lk(mtx_);
+          if(runtimeMs_ && now-runtimeMs_<2000) expected=runtime_[1]!=0; }
+        if(!thermalDevice_.empty() && now-reopenMs>=5000 &&
+           (!thermalSerial_.isOpen() || (expected && now-lastRawMs>5000))) {
+            reopenMs=now; thermalSolver_.resetFrame();
+            thermalSerial_.open(thermalDevice_,thermalBaud_);
+            lastRawMs=now; eepromRequest_.store(true);
+        }
         thermalSerial_.poll();
+        { std::lock_guard<std::mutex> lk(mtx_); thermalDiag_=thermalSerial_.thermalDiag(); }
 
         bool haveEe = false, haveRaw = false;
         {
             std::lock_guard<std::mutex> lk(rawMtx_);
             if (pendingEeNew_)  { ee.swap(pendingEe_);   pendingEeNew_  = false; haveEe  = true; }
             if (pendingRawNew_) { raw.swap(pendingRaw_); pendingRawNew_ = false; haveRaw = true; }
+        }
+        if(haveRaw) {
+            if(nowMs()-lastRawMs>2000) thermalSolver_.resetFrame();
+            lastRawMs=nowMs();
         }
         // 提参在前（solve 需先就绪），再解算最新一帧原始数据。
         if (haveEe && static_cast<int>(ee.size()) >= ThermalSolver::EE_WORDS)
@@ -195,7 +239,7 @@ void RobotController::solverLoop() {
 
         // 无待处理数据时小睡，避免空转占 CPU（热成像仅 ~2Hz，10ms 轮询足够跟手）。
         if (!haveEe && !haveRaw)
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(expected?5:50));
     }
     LOG_INFO("热成像解算线程退出");
 }
@@ -216,9 +260,10 @@ void RobotController::updateEncoderSpeed(int32_t enc1, int32_t enc2) {
     auto clampI16 = [](double v) -> int16_t {
         return static_cast<int16_t>(std::max(-32768.0, std::min(32767.0, v)));
     };
+    if(dt>1000U) { encSpeed1_=encSpeed2_=0;lastEnc1_=enc1;lastEnc2_=enc2;lastEncMs_=now;return; }
     double f = 1000.0 / dt;   // -> counts/s
-    encSpeed1_ = clampI16((enc1 - lastEnc1_) * f);
-    encSpeed2_ = clampI16((enc2 - lastEnc2_) * f);
+    encSpeed1_ = clampI16(static_cast<int32_t>(uint32_t(enc1)-uint32_t(lastEnc1_)) * f);
+    encSpeed2_ = clampI16(static_cast<int32_t>(uint32_t(enc2)-uint32_t(lastEnc2_)) * f);
     lastEnc1_ = enc1; lastEnc2_ = enc2; lastEncMs_ = now;
 }
 
@@ -248,21 +293,28 @@ void RobotController::onTelemetry(const serial_proto::Telemetry& t) {
 void RobotController::onEnv(const serial_proto::EnvData& e) {
     std::lock_guard<std::mutex> lk(mtx_);
     env_       = e;
+    if (e.valid && ((e.flags & serial_proto::ENV_FLAG_DHT_OK) ||
+        (!dhtSeen_ && (runtime_[9] || runtime_[10])))) {
+        dhtSeen_=true; heldDhtTemp_=e.temp_c; heldDhtHumidity_=e.humi;
+    }
     lastEnvMs_ = nowMs();
     ++envRxCnt_;
     // 激光距离 EMA（超量程值不参与滤波）
     // α 同步提到 0.65（理由见 onTelemetry 里的说明）。F4 侧已加超量程去抖，
     // 到这里的样本已经是稳定的有效值，不需要再用大惯性去压抖动。
-    if (e.vl53_mm != serial_proto::VL53_OUT_OF_RANGE)
+    if ((e.flags & serial_proto::ENV_FLAG_VL53_OK) && e.vl53_mm && e.vl53_mm != serial_proto::VL53_OUT_OF_RANGE)
         vl53FiltMm_ = ema(vl53FiltMm_, static_cast<float>(e.vl53_mm), vl53Init_, 0.65f);
 }
 
 void RobotController::onThermal(const int16_t* temps, int cols, int rows) {
+    std::lock_guard<std::mutex> stateLock(mtx_);
+    if(!thermalExpected_.load() || cols<=0 || rows<=0 || cols*rows>768) return;
     std::lock_guard<std::mutex> lk(thermalMtx_);
     thermal_.assign(temps, temps + static_cast<size_t>(cols) * rows);
     thermalCols_ = cols;
     thermalRows_ = rows;
     thermalNew_  = true;
+    thermalFrameGeneration_=thermalEpoch_.load();
     ++thermalRxCnt_;
 
     // 热点检测：整幅最高温（0.01°C 单位）-> 疑似火源/过热告警，联动风险等级。
@@ -271,8 +323,11 @@ void RobotController::onThermal(const int16_t* temps, int cols, int rows) {
         vmax = std::max(vmax, temps[i]);
     int maxC10 = static_cast<int>(std::lround(vmax / 10.0));   // ×10 °C
     thermalMaxC10_.store(maxC10, std::memory_order_relaxed);
-    thermalHotspot_.store(maxC10 >= static_cast<int>(kHotspotThreshC * 10),
+    thermalHotspot_.store(maxC10 >= static_cast<int>(kHotspotThreshC * 10) ||
+                          (thermalHotspot_.load() && maxC10>450),
                           std::memory_order_relaxed);
+    thermalLastMs_.store(nowMs(), std::memory_order_relaxed);
+    ++thermalSampleSeq_;
 }
 
 void RobotController::onEeprom(const uint16_t* ee, int words) {
@@ -284,20 +339,21 @@ void RobotController::onEeprom(const uint16_t* ee, int words) {
 }
 
 void RobotController::onRawThermal(const uint16_t* raw, int words) {
-    if (words < ThermalSolver::FRAME_WORDS) return;
+    if (words < ThermalSolver::FRAME_WORDS || !thermalExpected_.load()) return;
     // ★不在串口/控制线程内解算（CalculateTo 重）——只暂存最新一帧(新盖旧)交解算线程。
     std::lock_guard<std::mutex> lk(rawMtx_);
     pendingRaw_.assign(raw, raw + ThermalSolver::FRAME_WORDS);
     pendingRawNew_ = true;
 }
 
-bool RobotController::takeThermal(std::vector<int16_t>& out, int& cols, int& rows) {
+bool RobotController::takeThermal(std::vector<int16_t>& out, int& cols, int& rows, uint32_t* generation) {
     std::lock_guard<std::mutex> lk(thermalMtx_);
-    if (!thermalNew_) return false;
+    if (!thermalNew_ || !thermalLastMs_.load() || nowMs()-thermalLastMs_.load()>3000) return false;
     out  = thermal_;
     cols = thermalCols_;
     rows = thermalRows_;
     thermalNew_ = false;
+    if(generation) *generation=thermalFrameGeneration_;
     return true;
 }
 
@@ -333,6 +389,7 @@ void RobotController::tick() {
 
     // 2) 取共享状态快照
     uint8_t  mode; int16_t mSpd, mStr; bool estop;
+    uint8_t  visionAlarm = 0;
     serial_proto::Telemetry t;
     uint16_t avoidDist;   // 用于避障的距离：优先滤波后的稳定值
     uint32_t lastTelem; bool telValid;
@@ -342,17 +399,23 @@ void RobotController::tick() {
         estop = estop_; t = telem_;
         avoidDist = distInit_ ? static_cast<uint16_t>(std::lround(distFiltCm_)) : t.dist_cm;
         lastTelem = lastTelemMs_; telValid = telemValid_;
+        if(mode==serial_proto::MODE_LINE_ONLY || mode==serial_proto::MODE_LINE_VISION) {
+            if(!autoArmed_ && runtimeMs_ && nowMs()-runtimeMs_<2000 && runtime_[6]==speedGear_)
+                autoArmed_=true;
+            if(!autoArmed_) { mode=serial_proto::MODE_MANUAL; mSpd=0; mStr=0; }
+        }
+        if (lastVisionMs_ && (nowMs() - lastVisionMs_) < 3000) {
+            if      (vision_.flags & net::VIS_FIRE)  visionAlarm = 2;
+            else if (vision_.flags & net::VIS_SMOKE) visionAlarm = 1;
+        }
     }
 
     // 2.5) 串口自恢复看门狗：端口开着、曾收到过遥测，却连续 >3s 断流→疑似 fd 卡死/
     //      线缆抖动，重开串口自愈（F4 已把遥测与心跳解耦，正常绝不停发，触发即真异常）。
     //      限流：最多每 5s 一次，避免真断线时反复重开刷屏。
-    if (isOpen() && telValid) {
-        uint32_t now = nowMs();
-        if ((now - lastTelem) > 3000 && (now - lastReopenMs_) > 5000) {
-            lastReopenMs_ = now;
-            reopenControlSerial();
-        }
+    uint32_t now=nowMs();
+    if ((!isOpen() || now-(telValid ? lastTelem : openedMs_)>3000) && now-lastReopenMs_>5000) {
+        lastReopenMs_=now; reopenControlSerial();
     }
     (void)avoidDist;   // 距离仍用于风险判断/上报，但不再驱动龙芯侧转向（见下）
 
@@ -368,12 +431,43 @@ void RobotController::tick() {
         speed = mSpd; steering = mStr;
     } else {
         // 非手动：只给基础前进速度，转向恒 0（交 F4 本地决策）。
-        speed    = (mode == serial_proto::MODE_OBSTACLE) ? av_.obstacleSpeed : av_.cruiseSpeed;
+        std::lock_guard<std::mutex> lk(mtx_);
+        speed = static_cast<int16_t>(100+100*speedGear_);
         steering = 0;
     }
 
+    {
+      std::lock_guard<std::mutex> lk(mtx_);
+      const int16_t cap=static_cast<int16_t>(100+100*speedGear_);
+      speed=std::max<int16_t>(-cap,std::min<int16_t>(cap,speed));
+    }
+    if(now-lastConfigMs_>=500) {
+      lastConfigMs_=now;
+      uint8_t preview,gear,seq,flags=0;
+      { std::lock_guard<std::mutex> lk(mtx_);
+        if(!upperConnected_ && requestedPreview_!=0 && now-upperDisconnectedMs_>=5000) {
+            requestedPreview_=0; ++configSeq_;
+        }
+        preview=requestedPreview_; gear=speedGear_; seq=configSeq_;
+        if(lastVisionMs_ && now-lastVisionMs_<3000) {
+          if(vision_.flags&net::VIS_FIRE) flags|=1;
+          if(vision_.flags&net::VIS_SMOKE) flags|=2;
+        }
+      }
+      if(thermalLastMs_.load() && now-thermalLastMs_.load()<3000 && thermalHotspot_.load()) flags|=4;
+      if(thermalLastMs_.load() && now-thermalLastMs_.load()<3000 && thermalMaxC10_.load()<=450) flags|=8;
+      uint8_t sampleSeq=thermalSampleSeq_.load();
+      bool ee=eepromRequest_.exchange(false), ok=false;
+      if(useCan_) ok=can_.sendRuntime(preview,flags,gear,seq,ee,sampleSeq);
+      else {
+        uint8_t f[12]={0xAA,0x63,8,preview,flags,gear,seq,static_cast<uint8_t>(ee),sampleSeq,0,0,0};
+        f[11]=serial_proto::xorChecksum(f,11); ok=serial_.sendFrame(f,12);
+      }
+      if(!ok && ee) eepromRequest_.store(true);
+    }
+
     // 4) 下发命令帧（CAN 0x201 / UART 0xAA，兼作 F4 510ms 心跳源）
-    if (useCan_) can_.sendCommand(speed, steering, mode);
+    if (useCan_) can_.sendCommand(speed, steering, mode, visionAlarm);
     else         serial_.sendCommand(speed, steering, mode);
 
     // 4.4) 冲刷巡检命令（模式联动启停 / 到点放行）
@@ -384,16 +478,24 @@ void RobotController::tick() {
         uint8_t cmdV = 0, actPt = 0, actAc = 0;
         {
             std::lock_guard<std::mutex> lk(mtx_);
-            cmdP = patrolCmdPending_; cmdV = patrolCmdVal_;  patrolCmdPending_ = false;
+            cmdV = patrolCmdVal_;
+            cmdP = patrolCmdPending_ && (cmdV!=can_proto::PC_START || autoArmed_);
+            if(cmdP) patrolCmdPending_=false;
             actP = patrolActPending_; actPt = patrolActPoint_;
             actAc = patrolActAction_;                         patrolActPending_ = false;
         }
         if (useCan_ && cmdP) {
-            can_.sendPatrolCmd(cmdV, 0);
+            if(!can_.sendPatrolCmd(cmdV, 0)) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if(!patrolCmdPending_ && patrolCmdVal_==cmdV) patrolCmdPending_=true;
+            }
             LOG_INFO("[巡检] 下发启停 cmd=%u", cmdV);
         }
         if (useCan_ && actP) {
-            can_.sendPatrolAct(actPt, actAc, 1);
+            if(!can_.sendPatrolAct(actPt, actAc, 1)) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                if(!patrolActPending_ && !estop_ && mode_!=0 && patrolActPoint_==actPt) patrolActPending_=true;
+            }
             LOG_INFO("[巡检] 下发放行 point=%u action=%u", actPt, actAc);
         }
     }
@@ -412,6 +514,12 @@ void RobotController::tick() {
 
 void RobotController::handleCommand(const net::Command& cmd) {
     switch (cmd.cmdId) {
+        case net::CMD_THERMAL: {
+            if(cmd.value>2) break;
+            std::lock_guard<std::mutex> lk(mtx_);
+            requestedPreview_=cmd.value; ++configSeq_; break;
+        }
+        case net::CMD_SPEED: setSpeedGear(cmd.value); break;
         case net::CMD_MODE:
             setMode(cmd.value);
             break;
@@ -439,7 +547,7 @@ void RobotController::setVision(const net::VisionResult& v) {
 uint8_t RobotController::computeRiskLocked(uint16_t distCm) const {
     uint8_t distRisk = (distCm != 0 && distCm < av_.stopDistCm) ? 3
                      : (distCm != 0 && distCm < av_.slowDistCm) ? 2 : 0;
-    const bool vl53Ok = env_.valid && (env_.flags & serial_proto::ENV_FLAG_VL53_OK) &&
+    const bool vl53Ok = env_.valid && nowMs()-lastEnvMs_<2000 && (env_.flags & serial_proto::ENV_FLAG_VL53_OK) &&
                         env_.vl53_mm != serial_proto::VL53_OUT_OF_RANGE;
     uint16_t laserCm = 0;
     if (vl53Ok) {
@@ -449,15 +557,18 @@ uint8_t RobotController::computeRiskLocked(uint16_t distCm) const {
     uint8_t laserRisk = (laserCm != 0 && laserCm < av_.stopDistCm) ? 3
                       : (laserCm != 0 && laserCm < av_.slowDistCm) ? 2 : 0;
     uint8_t envRisk = 0;
-    if (env_.valid) {
+    if (env_.valid && nowMs()-lastEnvMs_<2000) {
         if      (env_.alarm == serial_proto::ALARM_LV_FIRE) envRisk = 3;  // 火焰/气体
         else if (env_.alarm == serial_proto::ALARM_LV_WARN) envRisk = 2;  // 障碍确认/警告
     }
-    uint8_t thermRisk = thermalHotspot_.load(std::memory_order_relaxed) ? 3 : 0;
-    // 上位机视觉：识别到火焰=危险；识别到人=注意（仅 3s 内的新鲜结果参与判断）
+    const uint32_t thermalLast = thermalLastMs_.load(std::memory_order_relaxed);
+    const bool thermalFresh = thermalLast && (nowMs() - thermalLast) < kThermalFreshMs;
+    uint8_t thermRisk = thermalFresh && thermalHotspot_.load(std::memory_order_relaxed) ? 3 : 0;
+    // 上位机视觉：火焰=危险，烟雾=警告，人=注意（仅 3s 内新鲜结果）。
     uint8_t visRisk = 0;
     if (lastVisionMs_ && (nowMs() - lastVisionMs_) < 3000) {
         if      (vision_.flags & net::VIS_FIRE)   visRisk = 3;
+        else if (vision_.flags & net::VIS_SMOKE)  visRisk = 2;
         else if (vision_.flags & net::VIS_PERSON) visRisk = 1;
     }
     return std::max({distRisk, laserRisk, envRisk, thermRisk, visRisk});
@@ -468,18 +579,24 @@ std::string RobotController::statusLine() const {
     int distCm  = distInit_ ? static_cast<int>(std::lround(distFiltCm_)) : telem_.dist_cm;
     std::string laser = vl53Init_
         ? std::to_string(static_cast<int>(std::lround(vl53FiltMm_ / 10.0))) + "cm" : "--";
-    int maxC10 = thermalMaxC10_.load(std::memory_order_relaxed);
+    const uint32_t thermalLast = thermalLastMs_.load(std::memory_order_relaxed);
+    const bool thermalFresh = thermalLast && (nowMs() - thermalLast) < kThermalFreshMs;
+    int maxC10 = thermalFresh ? thermalMaxC10_.load(std::memory_order_relaxed) : -1000;
     uint8_t risk = computeRiskLocked(static_cast<uint16_t>(distCm));
 
     std::string s = std::string("v") + versionString()
         + (useCan_ ? " [CAN]" : " [UART]")
         + " RX[tele=" + std::to_string(telemRxCnt_)
         + " env="     + std::to_string(envRxCnt_)
-        + " th="      + std::to_string(thermalRxCnt_) + "]"
+        + " th="      + std::to_string(thermalRxCnt_.load()) + "]"
         + " dist="    + std::to_string(distCm) + "cm"
         + " laser="   + laser
         + " gas="     + std::to_string(env_.valid ? env_.gas_raw : 0)
         + " risk="    + std::to_string(risk);
+    s += " MOTION[target="+std::to_string(motionTarget_)+" right="+std::to_string(motionRight_)
+        +" left="+std::to_string(motionLeft_)+"cps pwm="+std::to_string(motionPwmRight_)
+        +"/"+std::to_string(motionPwmLeft_)+" dt="+std::to_string(motionDtMs_)
+        +"ms fault="+std::to_string(motionFault_)+" age="+std::to_string(motionMs_?nowMs()-motionMs_:0)+"ms]";
     // CAN 链路健康（★ EMI 诊断）：错误帧/bus-off/TEC/REC —— 用数字量化掉线是否被治好。
     // 读 tick 在 mtx_ 下拷贝的快照 canHealth_（不直接读 can_，避免与控制线程 poll 写竞争）。
     if (useCan_) {
@@ -493,7 +610,7 @@ std::string RobotController::statusLine() const {
     }
     // 热成像专线诊断：整帧计数长期不涨时，靠分块数/最大块号定位是"F4 没发"还是"尾块丢失"
     {
-        const auto td = thermalSerial_.thermalDiag();
+        const auto td = thermalDiag_;
         s += " THM[rawChk=" + std::to_string(td.rawChunks)
            + " rawFrm="     + std::to_string(td.rawFrames)
            + " maxIdx="     + std::to_string(td.rawMaxIdx)
@@ -501,7 +618,9 @@ std::string RobotController::statusLine() const {
            + " inc="        + std::to_string(td.rawIncomplete)
            + " eeChk="      + std::to_string(td.eeChunks)
            + " eeFrm="      + std::to_string(td.eeFrames)
-           + " crcDrop="    + std::to_string(td.crcDrop) + "]";
+           + " eeInc="      + std::to_string(td.eeIncomplete)
+           + " crcDrop="    + std::to_string(td.crcDrop)
+           + " bad="        + std::to_string(td.malformed) + "]";
     }
     if (maxC10 > -1000) s += " hot=" + std::to_string(maxC10 / 10) + "C";
     if (lastVisionMs_ && (nowMs() - lastVisionMs_) < 3000 && vision_.count)
@@ -512,7 +631,7 @@ std::string RobotController::statusLine() const {
 RobotController::LinkStatus RobotController::linkStatus() const {
     std::lock_guard<std::mutex> lk(mtx_);
     LinkStatus r;
-    r.f4Open       = useCan_ ? can_.isOpen() : serial_.isOpen();
+    r.f4Open       = controlOpen_.load();
     r.telemCnt     = telemRxCnt_;
     r.envCnt       = envRxCnt_;
     r.thermalCnt   = thermalRxCnt_;
@@ -523,8 +642,11 @@ RobotController::LinkStatus RobotController::linkStatus() const {
     r.visionCount  = vision_.count;
     r.visionConf   = vision_.maxConf;
     r.visionName   = vision_.topClass;
+    const uint32_t thermalLast = thermalLastMs_.load(std::memory_order_relaxed);
+    const bool thermalFresh = thermalLast && (now - thermalLast) < kThermalFreshMs;
     r.thermalMaxC10 = thermalMaxC10_.load(std::memory_order_relaxed);
-    r.hotspot      = thermalHotspot_.load(std::memory_order_relaxed);
+    r.thermalFresh = thermalFresh;
+    r.hotspot      = thermalFresh && thermalHotspot_.load(std::memory_order_relaxed);
     return r;
 }
 
@@ -535,15 +657,18 @@ void RobotController::setManual(int16_t speed, int16_t steering) {
 
 void RobotController::driveManual(int16_t speed, int16_t steering) {
     std::lock_guard<std::mutex> lk(mtx_);
-    mode_        = serial_proto::MODE_MANUAL;
-    estop_       = false;
+    // 自动巡检期间可能仍收到一两帧手柄定时器残留；急停也不能被普通 DRIVE 帧绕过。
+    if (mode_ != serial_proto::MODE_MANUAL || estop_) return;
     manualSpeed_ = speed;
     manualSteer_ = steering;
 }
 
 void RobotController::setMode(uint8_t mode) {
     std::lock_guard<std::mutex> lk(mtx_);
-    mode_  = mode & 0x03;
+    if(mode>3) return;
+    mode_  = mode;
+    autoArmed_=false;
+    patrolActPending_=false;
     estop_ = false;                 // 切换模式解除急停
     if (mode_ == serial_proto::MODE_MANUAL) { manualSpeed_ = 0; manualSteer_ = 0; }
     // 模式联动巡检启停：进循迹类模式即启动 F4 本地循线，回遥控即停止。
@@ -558,8 +683,14 @@ void RobotController::setMode(uint8_t mode) {
 
 void RobotController::emergencyStop() {
     std::lock_guard<std::mutex> lk(mtx_);
+    patrolActPending_=false;
+    autoArmed_=false;
     estop_ = true;
+    mode_ = serial_proto::MODE_MANUAL;
     manualSpeed_ = 0; manualSteer_ = 0;
+    // 周期 0x201 立即变成手动零速，同时 0x301 明确停止 F4 巡检状态机。
+    patrolCmdVal_ = can_proto::PC_STOP;
+    patrolCmdPending_ = true;
     status_ = RobotStatus::EStop;
     LOG_WARN("紧急停止触发！");
 }
@@ -572,40 +703,103 @@ void RobotController::fillSensorData(net::SensorData& s) const {
     s.encoder1     = telem_.enc1;
     s.encoder2     = telem_.enc2;
     // 速度上报由编码器实测的轮速（counts/s），比 F4 回显的设定值更真实
-    s.speed_L      = encInit_ ? encSpeed1_ : telem_.speed;
-    s.speed_R      = encInit_ ? encSpeed2_ : telem_.speed;
+    s.speed_L      = encInit_ ? encSpeed2_ : telem_.speed;
+    s.speed_R      = encInit_ ? encSpeed1_ : telem_.speed;
     s.servo_us     = actuators_.servo_us;
     s.mode         = mode_;
-    s.fault        = (telemValid_ && (nowMs() - lastTelemMs_) > 1000) ? 1 : 0;  // 遥测超时告警
+    s.fault        = (!telemValid_ || (nowMs() - lastTelemMs_) > 1000) ? 1 : 0;  // 遥测超时告警
     s.fan          = actuators_.fan    ? 1 : 0;
     s.relay        = actuators_.relay  ? 1 : 0;
     s.led          = actuators_.led    ? 1 : 0;
 
     // ---- 环境/安全传感器（来自 F4 0x5C 帧）----
-    const bool envValid = env_.valid;
+    const bool envValid = env_.valid && nowMs()-lastEnvMs_<2000;
+    s.flags=0;
+    s.temperature_01c=dhtSeen_ ? static_cast<int16_t>(heldDhtTemp_)*10 : 0;
+    s.humidity_01=dhtSeen_ ? static_cast<uint16_t>(heldDhtHumidity_)*10 : 0;
+    s.gas_ppm=env_.valid ? env_.gas_raw : 0;
+    s.laser_cm=vl53Init_ ? static_cast<uint16_t>(std::lround(vl53FiltMm_/10.0)) : 0;
+    if(!envValid) s.fault|=2;
+    if(runtimeMs_ && nowMs()-runtimeMs_>=2000) s.fault|=4;
     if (envValid) {
         s.gas_ppm = env_.gas_raw;                 // MQ2 原始 ADC（0~4095，非真实 ppm）
         s.flags   = env_.flags;                   // 位: 气体/火焰/DHT/VL53/障碍/蜂鸣
-        if (env_.flags & serial_proto::ENV_FLAG_DHT_OK) {
-            s.temperature_01c = static_cast<int16_t>(env_.temp_c) * 10;   // 0.1°C
-            s.humidity_01     = static_cast<uint16_t>(env_.humi) * 10;    // 0.1 %
+        bool dhtFresh=(env_.flags & serial_proto::ENV_FLAG_DHT_OK)!=0;
+        if(runtimeMs_) {
+            dhtFresh=dhtFresh && nowMs()-runtimeMs_<2000;
+            uint32_t age=(static_cast<uint16_t>(runtime_[11])<<8 | runtime_[12])*100U;
+            dhtFresh=dhtFresh && dhtStatusMs_ && nowMs()-dhtStatusMs_<2000 &&
+                (runtime_[9] || runtime_[10]) && age+nowMs()-dhtStatusMs_<7000;
         }
-        // 激光测距（VL53L0X）：有效则换算为厘米（v3 扩展字段），上报滤波后的稳定值
-        s.laser_cm = vl53Init_ ? static_cast<uint16_t>(std::lround(vl53FiltMm_ / 10.0))
-                   : (env_.vl53_mm != serial_proto::VL53_OUT_OF_RANGE)
-                       ? static_cast<uint16_t>(env_.vl53_mm / 10) : 0;
+        if(!dhtFresh) s.flags &= ~serial_proto::ENV_FLAG_DHT_OK;
     }
+    if (!(s.flags & serial_proto::ENV_FLAG_DHT_OK) && dhtSeen_) s.fault|=net::FAULT_DHT_HELD;
+    if (!(s.flags & serial_proto::ENV_FLAG_VL53_OK) && vl53Init_) s.fault|=net::FAULT_LASER_HELD;
+    if (!envValid && env_.valid) s.fault|=net::FAULT_ENV_HELD;
+    if(motionMs_ && nowMs()-motionMs_<1000U && motionFault_) s.fault|=net::FAULT_MOTION;
     // 蜂鸣器：F4 实鸣状态 或 上位机执行器回显
     s.buzzer = ((envValid && (env_.flags & serial_proto::ENV_FLAG_BUZZER)) ||
                 actuators_.buzzer) ? 1 : 0;
 
     // ---- 风险等级：龙芯"大脑"综合判断（距离/环境/热点/视觉）----
     s.risk_level = computeRiskLocked(s.distance_cm);
+    if(s.fault && s.risk_level==0) s.risk_level=1; // unavailable must not read as healthy
 }
 
 RobotMode RobotController::mode() const {
     std::lock_guard<std::mutex> lk(mtx_);
     return static_cast<RobotMode>(mode_);
+}
+
+
+void RobotController::setSpeedGear(uint8_t gear) {
+    if(gear>14) return;
+    std::lock_guard<std::mutex> lk(mtx_); speedGear_=gear; ++configSeq_;
+}
+void RobotController::setSpeedPersisted(bool ok) {
+    std::lock_guard<std::mutex> lk(mtx_); speedPersisted_=ok;
+}
+void RobotController::setUpperConnected(bool online) {
+    std::lock_guard<std::mutex> lk(mtx_); upperConnected_=online;
+    if(online) { requestedPreview_=0; ++configSeq_; }
+    else upperDisconnectedMs_=nowMs();
+    if(!online) { manualSpeed_=manualSteer_=0; vision_=net::VisionResult{}; lastVisionMs_=0; }
+}
+void RobotController::onRuntimeStatus(const uint8_t* p,size_t n) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if((n!=8 && n!=16) || (p[0]!=4 && p[0]!=5)) return;
+    if(p[0]==4) {
+        if(p[1]>3 || p[2]>2 || p[6]>14) return;
+        thermalExpected_.store(p[1]!=0);
+        if(runtime_[1]!=p[1] && (p[1]==0 || p[1]==1)) {
+            ++thermalEpoch_; thermalLastMs_.store(0); thermalHotspot_.store(false);
+            std::lock_guard<std::mutex> frameLock(thermalMtx_); thermalNew_=false;
+            if(p[1]==1) eepromRequest_.store(true);
+        }
+        std::copy(p,p+8,runtime_); runtimeMs_=nowMs();
+        if(n==16 && p[8]==5) { std::copy(p+8,p+16,runtime_+8); dhtStatusMs_=nowMs(); }
+    } else { std::copy(p,p+8,runtime_+8); dhtStatusMs_=nowMs(); }
+    // Recover F4's last successful sample even if this process attaches during a sensor outage.
+    if (!dhtSeen_ && env_.valid && (runtime_[9] || runtime_[10])) {
+        dhtSeen_=true; heldDhtTemp_=env_.temp_c; heldDhtHumidity_=env_.humi;
+    }
+}
+std::vector<uint8_t> RobotController::deviceStatus() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    uint32_t now=nowMs();
+    std::vector<uint8_t> p(27,0);
+    p[0]=1; p[1]=runtimeMs_ && now-runtimeMs_<2000;
+    p[2]=requestedPreview_; p[3]=speedGear_;
+    std::copy(runtime_,runtime_+16,p.begin()+4);
+    uint32_t envAge=lastEnvMs_ ? std::min<uint32_t>(65535,(now-lastEnvMs_)/100) : 65535;
+    uint32_t coreAge=lastTelemMs_ ? std::min<uint32_t>(65535,(now-lastTelemMs_)/100) : 65535;
+    p[20]=envAge&255; p[21]=envAge>>8; p[22]=coreAge&255; p[23]=coreAge>>8;
+    p[24]=thermalLastMs_.load() && now-thermalLastMs_.load()<3000;
+    p[25]=configSeq_; p[26]=speedPersisted_;
+    uint32_t age=dhtStatusMs_ ? std::min<uint32_t>(65535,
+        ((static_cast<uint16_t>(runtime_[11])<<8)|runtime_[12])+(now-dhtStatusMs_)/100) : 65535;
+    p[15]=age>>8; p[16]=age&255;
+    return p;
 }
 
 } // namespace patrol

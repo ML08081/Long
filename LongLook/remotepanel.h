@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSlider>
+#include <QSpinBox>
 #include <QTextEdit>
 #include <QTimer>
 #include <QWidget>
@@ -36,8 +37,8 @@ public:
 
     // 与《遥控手柄V2》config.h 同源，勿单方面改动，否则两个上位机手感会不一致
     static constexpr int kSpeedSlow   = 300;
-    static constexpr int kSpeedMedium = 600;
-    static constexpr int kSpeedFast   = 1000;
+    static constexpr int kSpeedMedium = 500;
+    static constexpr int kSpeedFast   = 1500;
     static constexpr int kSteerRange  = 1000;   // STEERING_SENSITIVITY
     static constexpr int kPollMs      = 16;     // UPDATE_RATE 60Hz
 
@@ -91,6 +92,7 @@ private:
 
     // 界面遥控
     QGroupBox *m_boxUi = nullptr;
+    QSpinBox *m_speedSetting=nullptr;
     QSlider   *m_sldSpeed = nullptr;
     QSlider   *m_sldSteer = nullptr;
     QLabel    *m_lblSpeed = nullptr;

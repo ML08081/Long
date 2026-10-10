@@ -1,3 +1,4 @@
+#include <QSignalBlocker>
 #include "remotepanel.h"
 
 #include <QButtonGroup>
@@ -160,7 +161,21 @@ QWidget *RemotePanel::buildManualGroup()
     kSpeed->setObjectName("Key");
     speedRow->addWidget(kSpeed);
     m_sldSpeed = new QSlider(Qt::Horizontal);
-    m_sldSpeed->setRange(-kSteerRange, kSteerRange);
+    m_sldSpeed->setRange(-m_net->speedLimit(),m_net->speedLimit());
+    m_speedSetting=new QSpinBox; m_speedSetting->setRange(100,1500);
+    m_speedSetting->setSingleStep(100); m_speedSetting->setValue(m_net->speedLimit());
+    m_speedSetting->setKeyboardTracking(false);
+    auto gearRow=new QHBoxLayout; gearRow->addWidget(new QLabel("全模式速度档位（步进100）"));
+    gearRow->addWidget(m_speedSetting); layout->addLayout(gearRow);
+    connect(m_speedSetting,qOverload<int>(&QSpinBox::valueChanged),this,[this](int v){
+        int value=qBound(100,100+((v-100+50)/100)*100,1500);
+        { QSignalBlocker b(m_speedSetting); m_speedSetting->setValue(value); }
+        m_net->requestSpeed(value);
+    });
+    connect(m_net,&NetClient::speedLimitChanged,this,[this](int v){
+        QSignalBlocker b(m_speedSetting); m_speedSetting->setValue(v);
+        m_sldSpeed->setRange(-v,v); refreshPadLabels();
+    });
     connect(m_sldSpeed, &QSlider::valueChanged, this, &RemotePanel::onSpeedChanged);
     speedRow->addWidget(m_sldSpeed, 1);
     m_lblSpeed = new QLabel("0");
@@ -198,7 +213,7 @@ QWidget *RemotePanel::buildManualGroup()
         QPushButton *button = new QPushButton(drive.text);
         button->setMinimumHeight(34);
         connect(button, &QPushButton::clicked, this, [this, drive]() {
-            m_sldSpeed->setValue(drive.speed);
+            m_sldSpeed->setValue(drive.speed==0?0:drive.speed>0?currentSpeedMax():-currentSpeedMax());
             m_sldSteer->setValue(drive.steer);
             sendCurrent();
         });
@@ -251,7 +266,7 @@ QWidget *RemotePanel::buildPadGroup()
     };
 
     addRow("手柄状态", m_lblPadState, "未启用");
-    addRow("速度档位", m_lblPadLevel, "中档 600");
+    addRow("速度档位", m_lblPadLevel, "默认 500");
     addRow("摇杆",     m_lblPadStick, "左 X=0.00  Y=0.00");
     addRow("当前输出", m_lblPadOut,   "速度=0  转向=0");
 
@@ -262,9 +277,9 @@ QWidget *RemotePanel::buildPadGroup()
         "B / 方向下    全速后退\n"
         "X / 方向左    左满舵\n"
         "Y / 方向右    右满舵\n"
-        "LB    低档 300 与中档 600 切换\n"
-        "RB    高档 1000 与中档 600 切换\n"
-        "Back  档位回到中档 600\n"
+        "LB    速度上限减 100（最低100）\n"
+        "RB    速度上限加 100（最高1500）\n"
+        "Back  速度上限恢复 500\n"
         "Start 紧急停止");
     help->setObjectName("Hint");
     layout->addWidget(help);
@@ -398,11 +413,7 @@ void RemotePanel::onStop()
 
 int RemotePanel::currentSpeedMax() const
 {
-    switch (m_padLevel) {
-    case 0:  return kSpeedSlow;
-    case 2:  return kSpeedFast;
-    default: return kSpeedMedium;
-    }
+    return m_net->speedLimit();
 }
 
 void RemotePanel::onPadTick()
@@ -420,7 +431,7 @@ void RemotePanel::applyPadState()
     const double rawSpeed = -m_padAxes[1];
     const double rawSteer =  m_padAxes[0];
 
-    qint16 speed = static_cast<qint16>(qBound(-kSteerRange, int(rawSpeed * speedMax), kSteerRange));
+    qint16 speed = static_cast<qint16>(qBound(-speedMax, int(rawSpeed * speedMax), speedMax));
     qint16 steer = static_cast<qint16>(qBound(-kSteerRange, int(rawSteer * kSteerRange), kSteerRange));
 
     // 按键为“满量程”覆盖：A/B 走当前档位速度，X/Y 打满舵；方向键为 LongLook 扩展
@@ -453,9 +464,7 @@ void RemotePanel::applyPadState()
 void RemotePanel::refreshPadLabels()
 {
     if (!m_lblPadLevel) return;
-    static const char *names[] = {"低档", "中档", "高档"};
-    const int lv = qBound(0, m_padLevel, 2);
-    m_lblPadLevel->setText(QString("%1 %2").arg(names[lv]).arg(currentSpeedMax()));
+    m_lblPadLevel->setText(QString("全模式上限 %1").arg(currentSpeedMax()));
 }
 
 void RemotePanel::onPadConnected()
@@ -490,21 +499,9 @@ void RemotePanel::onPadButton(int button, bool pressed)
     case 7:                                       // Start：急停
         onEstop();
         break;
-    case 4:                                       // LB：低档 <-> 中档
-        m_padLevel = (m_padLevel == 0) ? 1 : 0;
-        refreshPadLabels();
-        onLog(QString("速度档位切换：%1").arg(currentSpeedMax()));
-        break;
-    case 5:                                       // RB：高档 <-> 中档
-        m_padLevel = (m_padLevel == 2) ? 1 : 2;
-        refreshPadLabels();
-        onLog(QString("速度档位切换：%1").arg(currentSpeedMax()));
-        break;
-    case 6:                                       // Back：回中档
-        m_padLevel = 1;
-        refreshPadLabels();
-        onLog("速度档位回到中档 600");
-        break;
+    case 4: m_net->requestSpeed(qMax(100,currentSpeedMax()-100)); break;
+    case 5: m_net->requestSpeed(qMin(1500,currentSpeedMax()+100)); break;
+    case 6: m_net->requestSpeed(500); break;
     default:
         break;
     }

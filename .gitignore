@@ -30,3 +30,8 @@ patrol_deploy*.tar.gz
 # CMake 缓存（若误生成在源码树）
 CMakeCache.txt
 CMakeFiles/
+
+# Isolated local validation builds
+/build-local-validation/
+/build-loong-local-validation/
+/tests/local_validation/build/
