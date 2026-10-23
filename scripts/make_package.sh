@@ -56,6 +56,9 @@ cp "$ROOT/deploy/scripts/migrate_network.sh"       "$PKG/scripts/migrate_network
 cp "$ROOT/deploy/scripts/health_check.sh"          "$PKG/scripts/health_check.sh"
 cp "$ROOT/deploy/systemd/patrol.service"           "$PKG/systemd/patrol.service"
 cp "$ROOT/deploy/systemd/patrol-network.service"   "$PKG/systemd/patrol-network.service"
+for unit in patrol-legacy-ap-guard.conf journald-patrol.conf patrol-journal-persist.service journald-bind.conf; do
+    cp "$ROOT/deploy/systemd/$unit" "$PKG/systemd/$unit"
+done
 cp "$ROOT/deploy/systemd/can0.service"             "$PKG/systemd/can0.service"
 cp "$ROOT/deploy/scripts/loong-usb-can-up.sh"       "$PKG/scripts/loong-usb-can-up.sh"
 cp "$ROOT/deploy/scripts/install_usb_can_recovery.sh" "$PKG/scripts/install_usb_can_recovery.sh"
@@ -63,6 +66,8 @@ cp "$ROOT/deploy/modprobe/pcan-can2.conf"           "$PKG/modprobe/pcan-can2.con
 for unit in usb-can2.service usb-can2-recover.service usb-can2-recover.timer patrol-usb-can2.conf; do
     cp "$ROOT/deploy/systemd/$unit" "$PKG/systemd/$unit"
 done
+mkdir -p "$PKG/tmpfiles"
+cp "$ROOT/deploy/tmpfiles/patrol-journal.conf" "$PKG/tmpfiles/patrol-journal.conf"
 cp "$ROOT/deploy/network.conf"                     "$PKG/network.conf"
 cp "$ROOT/deploy/wpa_supplicant.conf"              "$PKG/wpa_supplicant.conf"
 cp "$ROOT/deploy/install.sh"                        "$PKG/install.sh"

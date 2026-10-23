@@ -1,0 +1,12 @@
+[Unit]
+Description=Retain Patrol boot journals on persistent LoongOS storage
+After=systemd-tmpfiles-setup.service systemd-journald.service
+Wants=systemd-journald.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/journalctl --flush
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

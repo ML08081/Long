@@ -1,0 +1,15 @@
+--- a/drivers/net/wireless/aic8800/aic8800_bsp/aicsdio.c
++++ b/drivers/net/wireless/aic8800/aic8800_bsp/aicsdio.c
+@@ -368,0 +369,6 @@
++	/* The BSP probes function 2 but retains function 1. During MMC host
++	 * shutdown function 1 is removed first, so its card pointer can already
++	 * be NULL here. Hardware teardown has passed that function; calling SDIO
++	 * cleanup through it would dereference NULL (observed remove+0xcc).
++	 * Forget the stale handle and let MMC finish removing function 2.
++	 */
+@@ -369,0 +376,5 @@
++	if (!func || !func->card || !func->card->host) {
++		sdio_dbg("%s: retained SDIO function already detached\n", __func__);
++		aicbsp_sdiodev = NULL;
++		return;
++	}

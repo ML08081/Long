@@ -51,7 +51,25 @@ mkdir -p /var/log/patrol
 echo "==> [6/7] 安装 systemd 服务"
 install -m 644 "$HERE/systemd/patrol.service"          /etc/systemd/system/patrol.service
 install -m 644 "$HERE/systemd/patrol-network.service"  /etc/systemd/system/patrol-network.service
+# The vendor rc.local is a second AP launcher, independent of wifi-autoconnect.
+# Only guard the verified AIC8800/hostapd vendor script; preserve other rc.local uses.
+if [ -f /etc/rc.local ] && grep -q 'aic8800_bsp.ko' /etc/rc.local \
+    && grep -q 'hostapd -B /etc/hostapd.conf' /etc/rc.local; then
+    mkdir -p /etc/systemd/system/rc-local.service.d
+    [ -e /etc/patrol/rc-local-vendor-ap.backup ] || cp -p /etc/rc.local /etc/patrol/rc-local-vendor-ap.backup
+    install -m 644 "$HERE/systemd/patrol-legacy-ap-guard.conf" /etc/systemd/system/rc-local.service.d/90-patrol-station.conf
+fi
+# Retain bounded boot evidence across reboots and power interruptions.
+mkdir -p /etc/systemd/journald.conf.d /etc/systemd/system/systemd-journald.service.d /etc/tmpfiles.d
+install -m 644 "$HERE/tmpfiles/patrol-journal.conf" /etc/tmpfiles.d/patrol-journal.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/patrol-journal.conf
+install -m 644 "$HERE/systemd/journald-bind.conf" /etc/systemd/system/systemd-journald.service.d/90-patrol-storage.conf
+install -m 644 "$HERE/systemd/patrol-journal-persist.service" /etc/systemd/system/patrol-journal-persist.service
+install -m 644 "$HERE/systemd/journald-patrol.conf" /etc/systemd/journald.conf.d/90-patrol-persistent.conf
 systemctl daemon-reload
+systemctl restart systemd-journald.service
+systemctl enable --now patrol-journal-persist.service
+journalctl --flush || true
 
 echo "==> [7/7] 启用开机自启"
 systemctl enable patrol-network.service
