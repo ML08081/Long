@@ -60,7 +60,7 @@
  *  任务分层（2026-07-08 重构，对应《深度优化报告》方案A + CubeMX 任务表）：
  *    MotionControlTa (Realtime,   17ms) 运动闭环：遥控解析/差速/PID/测试激励
  *    RangingTask     (AboveNorm1,  1ms) 测距采集：HC 状态机推进 + VL53 非阻塞读
- *    ScanTask        (AboveNormal)      云台三态：开机建图扫一次 → 居中静止
+ *    ScanTask        (AboveNormal)      云台默认居中保持；全行程自检仅限台架
  *    TelemetryTask   (Normal,     20ms) 上报专职：7B 遥测 + 扩展帧 + PID 遥测
  *    EnvTask         (BelowNormal,100ms)慢速环境：MQ2/火焰/DHT11/蜂鸣 + 0x5C
  *    ThermalTask     (Low,        200ms)热成像原始帧转发（USART1 专线）
@@ -114,6 +114,14 @@
 /* Heartbeat deadlines use elapsed RTOS milliseconds, not loop counts. */
 #define HB_ACTIVE_MAX 85U
 #define HB_HOLD_MAX 510U
+
+/* Full-travel boot tests are bench-only: do not load both servos at power-on. */
+#ifndef BOOT_SERVO_SELF_TEST_ENABLED
+#define BOOT_SERVO_SELF_TEST_ENABLED 0
+#endif
+#ifndef BOOT_PAN_SCAN_ENABLED
+#define BOOT_PAN_SCAN_ENABLED 0
+#endif
 
 #ifndef THERMAL_TASK_ENABLED
 #define THERMAL_TASK_ENABLED 1     /* MLX90640 原始帧转发（USART1 专线） */
@@ -470,7 +478,7 @@ void StartMotionControlTask(void *argument)
   int16_t  s_obs_prev_cmd_spd = 0; /* 上一帧遥控速度，用于检测 <=0 -> >0 上升沿 */
 
   // 舵机自检状态机：0=INIT,1=→LEFT,2=WAIT_L,3=→RIGHT,4=WAIT_R,5=→CENTER,6=DONE
-  uint8_t  sc_state = 0;
+  uint8_t  sc_state = BOOT_SERVO_SELF_TEST_ENABLED ? 0U : 6U;
   uint8_t  sc_wait  = 0;
 
 
@@ -489,7 +497,7 @@ void StartMotionControlTask(void *argument)
     WDG_Kick(WDG_TASK_MOTION);
     WDG_Service();
 
-    // ===== 自检阶段（仅启动时执行一次；期间不动电机） =====
+    // ===== 显式启用的台架自检阶段（默认关闭；期间不动驱动电机） =====
     if (sc_state < 6)
     {
       uint8_t arrived = (Servo_RampTick() == 0);
@@ -866,15 +874,16 @@ void StartMotionControlTask(void *argument)
 void StartScanTask(void *argument)
 {
   /* USER CODE BEGIN StartScanTask */
-  /* 云台三态扫描（《深度优化报告》§4.5）：
-       ① BOOT_SCAN：上电扫一遍（MIN→MAX→回中），获取周边障碍初始态势；
-       ② 居中静止：巡航期间云台锁定中位，HC 前视（不再持续来回扫）；
+  /* 云台状态：
+       ① 默认上电居中静止，HC 前视，不自动跑极限位置；
+       ② BOOT_PAN_SCAN_ENABLED 仅供台架显式启用全行程自检；
        ③ ON_DEMAND：激光近障触发的按需扫描——随运动状态机接入（后续里程碑）。
      HC/编码器/OLED 均已移出本任务（HC→RangingTask，编码器→MotionControl，OLED 移除）。 */
-  LOG("[TASK] ScanTask: boot sweep once, then center & hold (on-demand scan later)");
+  LOG("[TASK] ScanTask: %s", BOOT_PAN_SCAN_ENABLED ?
+      "bench boot sweep enabled" : "center hold; automatic boot sweep disabled");
 
-  uint16_t pulse = SERVO2_MIN;
-  int8_t   phase = 0;           /* 0=去MAX 1=回MIN 2=回中完成 */
+  uint16_t pulse = BOOT_PAN_SCAN_ENABLED ? SERVO2_MIN : SERVO2_MID;
+  int8_t   phase = BOOT_PAN_SCAN_ENABLED ? 0 : 2; /* 0=去MAX 1=回MIN 2=居中 */
   Servo2_SetPulse(pulse);
   osDelay(300);                 /* 等云台到位 */
 

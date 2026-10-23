@@ -82,12 +82,21 @@ static uint8_t CANLink_NeedsRecovery(void)
 
 void CANLink_Service(void)
 {
+    static uint32_t lastAttemptMs;
+    static uint8_t attempted;
     if (!CANLink_NeedsRecovery()) {
         /* 链路健康 -> 清异常累计。否则长期运行中零星的自恢复会缓慢累加，
            最终误判为"不可恢复"而复位。只有【连续】异常才应触发看门狗。 */
         WDG_ClearFault();
         return;
     }
+
+    /* A missing/unpowered peer is an external link fault. Bound recovery work
+       and keep task watchdog supervision; resetting the MCU cannot repair it. */
+    uint32_t now = HAL_GetTick();
+    if (attempted && (uint32_t)(now - lastAttemptMs) < 1000U) return;
+    lastAttemptMs = now;
+    attempted = 1U;
 
     HAL_CAN_Stop(&hcan1);
     HAL_CAN_ResetError(&hcan1);
@@ -96,15 +105,14 @@ void CANLink_Service(void)
         HAL_CAN_ActivateNotification(&hcan1,
             CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_ERROR | CAN_IT_BUSOFF);
         g_can_recover_cnt++;
-        /* 软件级自恢复成功一次。若短时间内反复进这里，说明总线/收发器层面
-           持续异常（EMI、线序、终端电阻、供电），软件已无能为力 ——
-           上报给看门狗累计，超过 WDG_FAULT_LIMIT 次即停止喂狗让 IWDG 复位。 */
-        WDG_ReportFault(WDG_FAULT_CAN_DEAD);
+        /* 外部供电、线序或终端异常可能持续存在；只保留恢复计数，
+           不以这种外部故障触发整机复位及重新执行上电动作。 */
+        /* Diagnostic counters and command-heartbeat stopping remain active. */
     }
     else
     {
-        /* 连 Start 都失败：外设层面已不可用，直接计为异常 */
-        WDG_ReportFault(WDG_FAULT_CAN_DEAD);
+        /* 外设启动失败时继续按限频策略重试。任务卡死仍由任务看门狗检测。 */
+        /* Retry at the bounded rate; missing CAN must not restart boot motion. */
     }
 }
 
@@ -114,6 +122,11 @@ void CANLink_Service(void)
 uint8_t CANLink_Send(uint16_t cob_id, const uint8_t *data, uint8_t len)
 {
     CANLink_Service();
+
+    if (CANLink_NeedsRecovery()) {
+        g_can_tx_drop++;
+        return 0;
+    }
 
     if (len > 8U) len = 8U;
 

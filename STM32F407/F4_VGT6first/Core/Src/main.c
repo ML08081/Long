@@ -66,7 +66,8 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+/* Retain the raw reset flags after RCC clears them, for UART/SWD diagnosis. */
+volatile uint32_t g_boot_reset_flags = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -160,6 +161,7 @@ int main(void)
   /* USER CODE BEGIN Init */
   /* Active-low PB8 must be silent before clock/peripheral initialization. */
   Buzzer_EarlySilence();
+  g_boot_reset_flags = RCC->CSR;
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -208,13 +210,13 @@ int main(void)
      SFTRST=软件复位 PINRST=按键/NRST(正常手动复位) PORRST=正常上电 */
   {
     const char *cause = "UNKNOWN";
-    if      (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST))  cause = "BOR(欠压-供电不足!)";
-    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) cause = "IWDG(看门狗-任务卡死!)";
+    if      (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) cause = "IWDG(看门狗复位，需核对任务/故障计数)";
     else if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST)) cause = "WWDG(窗口看门狗)";
     else if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST))  cause = "SOFT(软件复位)";
+    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST))  cause = "POR/PDR(上电/掉电复位)";
+    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST))  cause = "BOR(电源复位标志，需核对供电)";
     else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST))  cause = "PIN(按键/NRST)";
-    else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST))  cause = "POR(上电)";
-    LOG("[RESET] cause=%s", cause);
+    LOG("[RESET] flags=0x%08lX cause=%s", (unsigned long)g_boot_reset_flags, cause);
     __HAL_RCC_CLEAR_RESET_FLAGS();
   }
 
