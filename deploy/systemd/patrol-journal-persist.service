@@ -1,11 +1,14 @@
 [Unit]
 Description=Retain Patrol boot journals on persistent LoongOS storage
-After=systemd-tmpfiles-setup.service systemd-journald.service
+After=local-fs.target systemd-remount-fs.service systemd-tmpfiles-setup.service systemd-journald.service
 Wants=systemd-journald.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/journalctl --flush
+# Early bind mounts retain read-only root and can be hidden by /var/volatile.
+# Recreate the journal namespace after local storage and tmpfiles are ready.
+ExecStart=/usr/bin/systemctl restart systemd-journald.service
+ExecStartPost=/usr/bin/journalctl --flush
 RemainAfterExit=yes
 
 [Install]

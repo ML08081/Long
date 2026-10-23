@@ -64,9 +64,22 @@ static uint8_t buzzer_pattern_on(BuzzerPattern p, uint16_t phase_ms)
     }
 }
 
+void Buzzer_EarlySilence(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    /* Preload the inactive level before enabling the output driver. */
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, BUZZER_OFF_LEVEL);
+    gpio.Pin = Buzzer_Pin;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull = GPIO_PULLUP;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(Buzzer_GPIO_Port, &gpio);
+}
+
 void Buzzer_Init(void)
 {
-    /* PB8 已由 MX_GPIO_Init 配为推挽输出，这里仅确保初始静音 */
+    Buzzer_EarlySilence();
     s_requested_pattern = BUZZER_OFF;
     s_active_pattern    = BUZZER_OFF;
     s_elapsed_ms = 0;

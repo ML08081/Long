@@ -9,7 +9,10 @@ callback=source[start:end]
 prefix=r'''
 #include <assert.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stddef.h>
+enum { SYSTEM_RUNNING, SYSTEM_RESTART, SYSTEM_HALT, SYSTEM_POWER_OFF };
+static int system_state = SYSTEM_RUNNING;
 struct mmc_host { unsigned caps; };
 struct mmc_card { struct mmc_host *host; };
 struct device { void *data; };
@@ -30,6 +33,14 @@ static void dev_set_drvdata(struct device *d,void *p) { d->data=p; }
 '''
 suffix=r'''
 int main(void) {
+    for (int state=SYSTEM_RESTART;state<=SYSTEM_POWER_OFF;state++) {
+        system_state=state;
+        /* Non-NULL freed sibling allocations must never be dereferenced. */
+        aicbsp_sdiodev=(struct aic_sdio_dev *)(uintptr_t)0xdead1000;
+        aicbsp_sdio_remove((struct sdio_func *)(uintptr_t)0xdead2000);
+        assert(!aicbsp_sdiodev && releases==0 && deinits==0);
+    }
+    system_state=SYSTEM_RUNNING;
     struct mmc_host host={MMC_CAP_NONREMOVABLE|1};
     struct mmc_card card={&host};
     struct sdio_func first={&card,{NULL}},second={&card,{NULL}};
@@ -65,4 +76,4 @@ with tempfile.TemporaryDirectory(prefix='aic-remove-validation-') as temp:
     c.write_text(prefix+callback+suffix)
     subprocess.run(['gcc','-std=c11','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(c),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('PASS: actual AIC remove callback under ASan/UBSan: empty, no bus, no retained function, removed card, no host, no SDIO data, normal cleanup and duplicate callback')
+print('PASS: actual AIC remove under ASan/UBSan: reboot/halt/poweroff skip poisoned freed sibling handles; running-state empty/null cases, normal cleanup and duplicate callback')

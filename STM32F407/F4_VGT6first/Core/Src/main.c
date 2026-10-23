@@ -158,7 +158,8 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /* Active-low PB8 must be silent before clock/peripheral initialization. */
+  Buzzer_EarlySilence();
   /* USER CODE END Init */
 
   /* Configure the system clock */

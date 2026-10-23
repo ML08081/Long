@@ -61,6 +61,7 @@ for unit in patrol-legacy-ap-guard.conf journald-patrol.conf patrol-journal-pers
 done
 cp "$ROOT/deploy/systemd/can0.service"             "$PKG/systemd/can0.service"
 cp "$ROOT/deploy/scripts/loong-usb-can-up.sh"       "$PKG/scripts/loong-usb-can-up.sh"
+cp "$ROOT/deploy/scripts/loong-usb-can-down.sh"     "$PKG/scripts/loong-usb-can-down.sh"
 cp "$ROOT/deploy/scripts/install_usb_can_recovery.sh" "$PKG/scripts/install_usb_can_recovery.sh"
 cp "$ROOT/deploy/modprobe/pcan-can2.conf"           "$PKG/modprobe/pcan-can2.conf"
 for unit in usb-can2.service usb-can2-recover.service usb-can2-recover.timer patrol-usb-can2.conf; do

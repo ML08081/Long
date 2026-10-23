@@ -14,10 +14,12 @@ fi
 case "${1:-}" in ''|--install-only) ;; *) echo 'Expected --install-only or no argument' >&2; exit 2;; esac
 [ "$(id -u)" = 0 ] || { echo 'Run as root' >&2; exit 1; }
 sh -n "$SCRIPTS/loong-usb-can-up.sh"
+sh -n "$SCRIPTS/loong-usb-can-down.sh"
 BACKUP="/root/can-recovery-backup-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$BACKUP"
 for path in \
     usr/local/sbin/loong-usb-can-up \
+    usr/local/sbin/loong-usb-can-down \
     etc/systemd/system/usb-can2.service \
     etc/systemd/system/usb-can2-recover.service \
     etc/systemd/system/usb-can2-recover.timer \
@@ -43,6 +45,7 @@ fi
 systemctl stop usb-can2-recover.timer usb-can2-recover.service 2>/dev/null || true
 install -d /usr/local/sbin /etc/modprobe.d /etc/modules-load.d /etc/systemd/system/patrol.service.d
 install -m 755 "$SCRIPTS/loong-usb-can-up.sh" /usr/local/sbin/loong-usb-can-up
+install -m 755 "$SCRIPTS/loong-usb-can-down.sh" /usr/local/sbin/loong-usb-can-down
 for name in usb-can2.service usb-can2-recover.service usb-can2-recover.timer; do
     install -m 644 "$DEPLOY/systemd/$name" "/etc/systemd/system/$name"
 done

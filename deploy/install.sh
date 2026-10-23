@@ -68,7 +68,8 @@ install -m 644 "$HERE/systemd/patrol-journal-persist.service" /etc/systemd/syste
 install -m 644 "$HERE/systemd/journald-patrol.conf" /etc/systemd/journald.conf.d/90-patrol-persistent.conf
 systemctl daemon-reload
 systemctl restart systemd-journald.service
-systemctl enable --now patrol-journal-persist.service
+systemctl enable patrol-journal-persist.service
+systemctl restart patrol-journal-persist.service
 journalctl --flush || true
 
 echo "==> [7/7] 启用开机自启"

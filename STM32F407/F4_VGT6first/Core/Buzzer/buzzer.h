@@ -29,6 +29,9 @@ typedef enum {
     BUZZER_FAULT    = 7,   // 系统故障：双 1000ms 长响 / 1700ms 停
 } BuzzerPattern;
 
+/* HAL_Init 后立即调用，尽早结束复位期间 PB8 输入悬空状态。 */
+void Buzzer_EarlySilence(void);
+
 /* 初始化：PB8 输出，初始静音 */
 void Buzzer_Init(void);
 

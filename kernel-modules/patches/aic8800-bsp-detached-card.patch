@@ -1,15 +1,21 @@
 --- a/drivers/net/wireless/aic8800/aic8800_bsp/aicsdio.c
 +++ b/drivers/net/wireless/aic8800/aic8800_bsp/aicsdio.c
-@@ -368,0 +369,6 @@
-+	/* The BSP probes function 2 but retains function 1. During MMC host
-+	 * shutdown function 1 is removed first, so its card pointer can already
-+	 * be NULL here. Hardware teardown has passed that function; calling SDIO
-+	 * cleanup through it would dereference NULL (observed remove+0xcc).
-+	 * Forget the stale handle and let MMC finish removing function 2.
+@@ -8,0 +9 @@
++#include <linux/kernel.h>
+@@ -355,0 +357,11 @@
++	/* MMC removes sibling function 1 before this function-2 callback. During
++	 * shutdown its allocation may already be freed, with non-NULL stale card
++	 * and host pointers. Never inspect or claim that function at this stage.
++	 * The kernel is terminating; SDIO/MMC owns the remaining device removal.
 +	 */
-@@ -369,0 +376,5 @@
++	if (system_state == SYSTEM_RESTART || system_state == SYSTEM_HALT ||
++	    system_state == SYSTEM_POWER_OFF) {
++		sdio_dbg("%s: skip detached sibling cleanup during shutdown\n", __func__);
++		aicbsp_sdiodev = NULL;
++		return;
++	}
+@@ -369,0 +382,4 @@
 +	if (!func || !func->card || !func->card->host) {
-+		sdio_dbg("%s: retained SDIO function already detached\n", __func__);
 +		aicbsp_sdiodev = NULL;
 +		return;
 +	}
