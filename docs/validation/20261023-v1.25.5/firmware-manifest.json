@@ -1,0 +1,51 @@
+{
+  "version": "1.25.5",
+  "source_baseline": "0b7ff6bdc35c05b0bb91d24dfabdd4783806e759",
+  "recorded_at": "2026-10-23T22:15:19.429891+08:00",
+  "firmware_flashed": true,
+  "flash_verification_passed": true,
+  "active_low_trigger_preserved": true,
+  "user_confirmed_silent": true,
+  "line_swap_lr": true,
+  "physical_line_direction_verified": false,
+  "physical_line_direction_note": "User chose not to perform physical direction validation",
+  "loongson_application_installed_version": "1.25.4",
+  "repository_application_version": "1.25.5",
+  "local_regression": {
+    "buzzer": true,
+    "linetrack": true,
+    "f4": true,
+    "motion": true,
+    "motor_encoder": true,
+    "can_fault_isolation": true,
+    "obstacle_intent": true,
+    "i2c_recovery": true
+  },
+  "device_checks": {
+    "open_drain_no_pull": true,
+    "silent": true,
+    "drive_stopped": true,
+    "no_cpu_faults": true,
+    "uptime_advances": true,
+    "can_commands_advance": true,
+    "no_can_errors": true
+  },
+  "files": {
+    "F4-buzzer-line-fixed.hex": {
+      "bytes": 313958,
+      "sha256": "3aafe52fd007634559870ae8bef046bd93968ea5b49f1dfe4ce867a2df050151"
+    },
+    "F4-buzzer-line-fixed.bin": {
+      "bytes": 111600,
+      "sha256": "ee92d116d7f458fcabe94d377b754ef88c35de51f5d54e94cde8891994e4cd84"
+    },
+    "F4-buzzer-line-fixed.elf": {
+      "bytes": 1803772,
+      "sha256": "d1f91b95ab0d1eb3581bbc80dd1d626b94ec46f1e3491a0adcb02ea51d09e33c"
+    },
+    "f4-before.bin": {
+      "bytes": 131072,
+      "sha256": "aba80acabc11d8e70f704bb274d4f87ed2663dafcdf40aa3e5e889f75ae62cc7"
+    }
+  }
+}

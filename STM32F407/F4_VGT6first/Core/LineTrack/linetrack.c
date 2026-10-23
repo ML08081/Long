@@ -166,9 +166,9 @@ LineState LineTrack_Read(void)
         for (uint8_t i = 0; i < 3; i++) { s_stab[i] = 0; s_cnt[i] = 0; }
         s_sample_seen = 0; s_history_count = 0;
     } else if (!s_sample_seen || now - s_sample_ms >= LINE_SAMPLE_MS) {
-        s_raw[0] = (uint16_t)g_adc_dma[ADC_CH_LINE_L];
+        s_raw[0] = (uint16_t)g_adc_dma[LINE_SWAP_LR ? ADC_CH_LINE_R : ADC_CH_LINE_L];
         s_raw[1] = (uint16_t)g_adc_dma[ADC_CH_LINE_C];
-        s_raw[2] = (uint16_t)g_adc_dma[ADC_CH_LINE_R];
+        s_raw[2] = (uint16_t)g_adc_dma[LINE_SWAP_LR ? ADC_CH_LINE_L : ADC_CH_LINE_R];
         if (s_history_count < 3U) s_history_count++;
         for (uint8_t i = 0; i < 3; i++) {
             if (!s_sample_seen) {
@@ -209,9 +209,15 @@ LineState LineTrack_Read(void)
     __disable_irq();
     uint32_t now = HAL_GetTick();
     if (!s_sample_seen || now - s_sample_ms >= LINE_SAMPLE_MS) {
+#if LINE_SWAP_LR
+        read_one(LINE_R_GPIO_Port, LINE_R_Pin, 0);
+        read_one(LINE_C_GPIO_Port, LINE_C_Pin, 1);
+        read_one(LINE_l_GPIO_Port, LINE_l_Pin, 2);
+#else
         read_one(LINE_l_GPIO_Port, LINE_l_Pin, 0);
         read_one(LINE_C_GPIO_Port, LINE_C_Pin, 1);
         read_one(LINE_R_GPIO_Port, LINE_R_Pin, 2);
+#endif
         s_sample_ms = now; s_sample_seen = 1;
     }
     LineState s = {s_stab[0], s_stab[1], s_stab[2]};

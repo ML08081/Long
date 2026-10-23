@@ -1,0 +1,6 @@
+[1/2] Building C object CMakeFiles/F4_VGT6first.dir/Core/Src/main.c.obj
+[2/2] Linking C executable F4_VGT6first.elf; Generating current F4_VGT6first.hex from linked ELF
+Memory region         Used Size  Region Size  %age Used
+             RAM:       54568 B       128 KB     41.63%
+          CCMRAM:           0 B        64 KB      0.00%
+           FLASH:      111600 B       512 KB     21.29%

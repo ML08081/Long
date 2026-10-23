@@ -313,11 +313,10 @@ int main(void)
 #endif
 
   /* 固件版本横幅：烧录后看这行即可确认跑的是不是最新固件（含各修复） */
-  LOG("[FW] F4 build 2026-07-17a: +CAN link(bidir) 500kbps alongside USART3(fallback)");
+  LOG("[FW] F4 v1.25.5: active-low PB8 open-drain silence; corrected line sensor L/R");
 
   LOG("[BRINGUP] All peripherals OK -> starting FreeRTOS scheduler");
-  LOG("[INFO] Power-up sequence: pan servo sweeps continuously;");
-  LOG("[INFO]   steering self-check LEFT->RIGHT->CENTER; then buttons:");
+  LOG("[INFO] Startup holds servos centered; bench self-checks are disabled by default");
   LOG("[INFO]   PA11 = Forward, PA12 = Backward (active-low)");
 
   /* USER CODE END 2 */

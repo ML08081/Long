@@ -47,12 +47,15 @@ uint32_t test_ms, test_irq;
 volatile uint16_t g_adc_dma[4];
 static uint8_t streaming=1;
 static uint16_t cap=500;
+/* Physical installation, independent of LINE_SWAP_LR: PC3 left, PC1 center,
+   PC0 right. DMA ranks remain PC0=1, PC1=2, PC3=3. */
+static const unsigned physical_channel[3]={3,2,1};
 uint8_t ADC_IsStreaming(void){return streaming;}
 uint16_t Runtime_Speed(void){return cap;}
 /* Deliberately unequal synthetic channels; not hardware measurements. */
 static const uint16_t bg[3]={2790,1065,2140}, line[3]={3900,2600,3400};
 static LineState sample(unsigned bits, unsigned cycles){
-  for(int i=0;i<3;i++)g_adc_dma[i+1]=(bits&(1U<<i))?line[i]:bg[i];
+  for(int i=0;i<3;i++)g_adc_dma[physical_channel[i]]=(bits&(1U<<i))?line[i]:bg[i];
   LineState s={0};
   while(cycles--){test_ms+=5;s=LineTrack_Read();assert(!test_irq);}
   return s;
@@ -90,20 +93,22 @@ int main(void){
   const int8_t errors[8]={0,-2,0,-1,2,0,1,0};
   for(unsigned bits=0;bits<8;bits++){
     LineState s=sample(bits,8);
+    uint16_t raw[3];LineTrack_GetRaw(&raw[0],&raw[1],&raw[2]);
+    for(int i=0;i<3;i++)assert(raw[i]==((bits&(1U<<i))?line[i]:bg[i]));
     assert((LineTrack_PackBits(s)&7U)==bits);
     assert(LineTrack_Error(s)==errors[bits]);
     assert(LineTrack_IsLost(s)==(bits==0));
     assert(LineTrack_IsJunction(s)==(bits==7));
   }
   /* Repeated consumers within one tick do not advance median/debounce. */
-  sample(0,8);g_adc_dma[1]=line[0];test_ms+=5;
+  sample(0,8);g_adc_dma[physical_channel[0]]=line[0];test_ms+=5;
   for(int n=0;n<100;n++)assert(!LineTrack_Read().l);
   test_ms+=5;assert(!LineTrack_Read().l);
   test_ms+=5;assert(LineTrack_Read().l);
   /* Hysteresis holds either state in the dead band. */
-  g_adc_dma[1]=(uint16_t)((off[0]+on[0])/2U);
+  g_adc_dma[physical_channel[0]]=(uint16_t)((off[0]+on[0])/2U);
   for(int n=0;n<8;n++){test_ms+=5;assert(LineTrack_Read().l);}
-  sample(0,8);g_adc_dma[1]=(uint16_t)((off[0]+on[0])/2U);
+  sample(0,8);g_adc_dma[physical_channel[0]]=(uint16_t)((off[0]+on[0])/2U);
   for(int n=0;n<8;n++){test_ms+=5;assert(!LineTrack_Read().l);}
   /* Invalid two-point calibration is rejected atomically. */
   uint16_t bad[3]={bg[0]+1,line[1],line[2]};
@@ -111,7 +116,7 @@ int main(void){
   /* Each channel's polarity can differ, without rewiring. */
   uint16_t reversed[3]={1000,2600,500};
   assert(LineTrack_SetCalibration(bg,reversed));
-  for(int i=0;i<3;i++)g_adc_dma[i+1]=reversed[i];
+  for(int i=0;i<3;i++)g_adc_dma[physical_channel[i]]=reversed[i];
   for(int n=0;n<8;n++){test_ms+=5;LineTrack_Read();}
   assert(LineTrack_IsJunction(LineTrack_Read()));sample(0,8);
   assert(LineTrack_IsLost(LineTrack_Read()));
@@ -125,6 +130,8 @@ int main(void){
   Patrol_Start();tick(0,0,&v,&a);assert(v==0);
   tick(7,0,&v,&a);assert(v==0&&Patrol_GetPointSeq()==0);
   tick(2,0,&v,&a);assert(v==cap&&a==0&&LineTrack_IsCalibrated());
+  tick(6,0,&v,&a);assert(a==350);
+  tick(4,0,&v,&a);assert(a==700);
   tick(3,0,&v,&a);assert(a==-350);
   tick(1,0,&v,&a);assert(a==-700);
   /* Short loss remembers correction, and real elapsed time controls stopping. */
@@ -145,7 +152,7 @@ int main(void){
   /* Unsigned sampling deadlines also work across tick wrap. */
   LineTrack_Init();assert(LineTrack_SetCalibration(bg,line));test_ms=0xfffffff0U;
   assert(LineTrack_IsLost(sample(0,8)));assert(sample(2,8).c);
-  puts("PASS: real ADC line/patrol sources: per-channel learning, hysteresis, median impulses, polarity, fixed sampling, all patterns, uncalibrated/stopped-ADC gating, junction confirmation and bounded line/turn loss");
+  puts("PASS: installed PC3/PC1/PC0 left/center/right mapping, raw telemetry, left/right steering, per-channel learning, hysteresis, median impulses, polarity, fixed sampling, all patterns, ADC gating, junction confirmation and bounded loss");
 }
 ''')
     includes = [p, f4 / "Core/LineTrack", f4 / "Core/Patrol"]

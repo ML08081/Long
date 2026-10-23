@@ -1,0 +1,136 @@
+{
+  "checks": {
+    "open_drain_no_pull": true,
+    "silent": true,
+    "drive_stopped": true,
+    "no_cpu_faults": true,
+    "uptime_advances": true,
+    "can_commands_advance": true,
+    "no_can_errors": true
+  },
+  "samples": [
+    {
+      "timestamp": "2026-10-23T22:12:00.825554+08:00",
+      "uptime_ms": 21956,
+      "pb8_mode": 1,
+      "pb8_open_drain": true,
+      "pb8_pull": 0,
+      "pb8_output_high": true,
+      "pb8_input_high": true,
+      "requested_pattern": 0,
+      "active_pattern": 0,
+      "sounding": 0,
+      "motor_pwm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "cpu_faults": [
+        0,
+        0
+      ],
+      "adc_dma": [
+        1836,
+        4006,
+        3864,
+        3525
+      ],
+      "line_raw_lcr": [
+        3494,
+        3863,
+        4002
+      ],
+      "line_state_lcr": [
+        0,
+        0,
+        0
+      ],
+      "can_rx_commands": 1120,
+      "can_errors": 0,
+      "can_busoff": 0
+    },
+    {
+      "timestamp": "2026-10-23T22:12:03.059348+08:00",
+      "uptime_ms": 24197,
+      "pb8_mode": 1,
+      "pb8_open_drain": true,
+      "pb8_pull": 0,
+      "pb8_output_high": true,
+      "pb8_input_high": true,
+      "requested_pattern": 0,
+      "active_pattern": 0,
+      "sounding": 0,
+      "motor_pwm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "cpu_faults": [
+        0,
+        0
+      ],
+      "adc_dma": [
+        1788,
+        4015,
+        3884,
+        3494
+      ],
+      "line_raw_lcr": [
+        3502,
+        3873,
+        4015
+      ],
+      "line_state_lcr": [
+        0,
+        0,
+        0
+      ],
+      "can_rx_commands": 1187,
+      "can_errors": 0,
+      "can_busoff": 0
+    },
+    {
+      "timestamp": "2026-10-23T22:12:05.268249+08:00",
+      "uptime_ms": 26415,
+      "pb8_mode": 1,
+      "pb8_open_drain": true,
+      "pb8_pull": 0,
+      "pb8_output_high": true,
+      "pb8_input_high": true,
+      "requested_pattern": 0,
+      "active_pattern": 0,
+      "sounding": 0,
+      "motor_pwm": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "cpu_faults": [
+        0,
+        0
+      ],
+      "adc_dma": [
+        1813,
+        3991,
+        3870,
+        3494
+      ],
+      "line_raw_lcr": [
+        3497,
+        3871,
+        3985
+      ],
+      "line_state_lcr": [
+        0,
+        0,
+        0
+      ],
+      "can_rx_commands": 1254,
+      "can_errors": 0,
+      "can_busoff": 0
+    }
+  ]
+}

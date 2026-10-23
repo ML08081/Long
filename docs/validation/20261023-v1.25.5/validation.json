@@ -1,0 +1,10 @@
+{
+  "buzzer": true,
+  "linetrack": true,
+  "f4": true,
+  "motion": true,
+  "motor_encoder": true,
+  "can_fault_isolation": true,
+  "obstacle_intent": true,
+  "i2c_recovery": true
+}

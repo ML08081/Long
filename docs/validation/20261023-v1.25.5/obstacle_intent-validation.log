@@ -1,0 +1,1 @@
+PASS: held forward cannot auto-unlock after safety zero; two real release/forward edges required; timeout resets confirmation

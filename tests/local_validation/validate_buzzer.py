@@ -16,8 +16,8 @@ typedef struct { int unused; } GPIO_TypeDef;
 typedef struct { uint32_t Pin,Mode,Pull,Speed; } GPIO_InitTypeDef;
 extern GPIO_TypeDef port;
 #define GPIOB (&port)
-#define GPIO_MODE_OUTPUT_PP 1
-#define GPIO_PULLUP 1
+#define GPIO_MODE_OUTPUT_OD 2
+#define GPIO_NOPULL 0
 #define GPIO_SPEED_FREQ_LOW 0
 void clock_enable(void);
 #define __HAL_RCC_GPIOB_CLK_ENABLE() clock_enable()
@@ -38,8 +38,8 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *p,uint16_t pin,GPIO_PinState value) {
     level=value; if(value==GPIO_PIN_RESET) ++low_writes;
 }
 void HAL_GPIO_Init(GPIO_TypeDef *p,GPIO_InitTypeDef *gpio) {
-    assert(p==GPIOB && gpio->Pin==256 && gpio->Mode==GPIO_MODE_OUTPUT_PP);
-    assert(gpio->Pull==GPIO_PULLUP && level==GPIO_PIN_SET);
+    assert(p==GPIOB && gpio->Pin==256 && gpio->Mode==GPIO_MODE_OUTPUT_OD);
+    assert(gpio->Pull==GPIO_NOPULL && level==GPIO_PIN_SET);
     configured=1;
 }
 int main(void) {
@@ -58,7 +58,7 @@ int main(void) {
     assert(level==GPIO_PIN_SET && !Buzzer_IsSounding());
     Buzzer_On(); assert(level==GPIO_PIN_RESET && Buzzer_IsSounding());
     Buzzer_Off(); assert(level==GPIO_PIN_SET && !Buzzer_IsSounding());
-    puts("PASS: early PB8 inactive preload, silent boot, active-low gas/flame alarms and OFF");
+    puts("PASS: early PB8 open-drain release without internal pulls, silent boot, active-low gas/flame alarms and OFF");
 }
 ''')
     exe = out/'test'

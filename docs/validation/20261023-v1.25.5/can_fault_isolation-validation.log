@@ -1,0 +1,1 @@
+PASS: missing CAN peer/start failures do not reset healthy tasks; recovery <=1/s; faulted CAN queues no TX; real task stalls and sensor faults still stop watchdog feeding

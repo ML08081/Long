@@ -1,7 +1,8 @@
 #include "buzzer.h"
 #include "main.h"     // Buzzer_Pin / Buzzer_GPIO_Port
 
-/* 低电平触发：安全/静音状态必须输出高电平。 */
+/* 低电平触发：开漏拉低鸣响，写高释放，由模块上拉恢复静音电平。
+ * 现场验证：推挽高电平仍鸣响，开漏释放后停止。不可改回推挽。 */
 #define BUZZER_ON_LEVEL   GPIO_PIN_RESET
 #define BUZZER_OFF_LEVEL  GPIO_PIN_SET
 
@@ -71,8 +72,8 @@ void Buzzer_EarlySilence(void)
     /* Preload the inactive level before enabling the output driver. */
     HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, BUZZER_OFF_LEVEL);
     gpio.Pin = Buzzer_Pin;
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    gpio.Pull = GPIO_PULLUP;
+    gpio.Mode = GPIO_MODE_OUTPUT_OD;
+    gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(Buzzer_GPIO_Port, &gpio);
 }
